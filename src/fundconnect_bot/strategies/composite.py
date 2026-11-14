@@ -56,6 +56,24 @@ def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
     )
 
 
+def _us_ref_close_on_asof(
+    eod_by_symbol: Mapping[str, Any], symbol: str, asof_date: date
+) -> Decimal:
+    bars = eod_by_symbol.get(symbol, ())
+    if not bars or bars[-1].session != asof_date:
+        raise ValueError(f"{symbol} lacks EOD bar on {asof_date}")
+    return Decimal(str(bars[-1].raw_close))
+
+
+def _hk_ref_close_on_asof(
+    hk_bars: Mapping[str, Mapping[date, Any]], symbol: str, asof_date: date
+) -> Decimal:
+    sym_bars = hk_bars.get(symbol)
+    if not sym_bars or asof_date not in sym_bars:
+        raise ValueError(f"{symbol} lacks HKEX EOD bar on {asof_date}")
+    return Decimal(str(sym_bars[asof_date].raw_close))
+
+
 @dataclass(frozen=True)
 class LiveSleeveState:
     """Optional live account holdings normalized per sleeve for week-to-week hysteresis."""
@@ -360,14 +378,14 @@ def build_weekly_plan(
             mkt: Literal["US", "HK"] = "US"
             currency_lit: Literal["USD", "HKD"] = "USD"
             lot = 1
-            ref_px = Decimal(str(us_data.eod_by_symbol[sym][-1].raw_close))
+            ref_px = _us_ref_close_on_asof(us_data.eod_by_symbol, sym, target_asof)
             is_etf = sym in US_MACRO_ETFS
             fallback = US_DEFENSIVE_SYMBOL
         else:
             mkt = "HK"
             currency_lit = "HKD"
             lot = get_hk_board_lot(sym, hk_basic_lots=hk_ts.board_lots)
-            ref_px = Decimal(str(hk_bars[sym][target_asof].raw_close))
+            ref_px = _hk_ref_close_on_asof(hk_bars, sym, target_asof)
             is_etf = sym in ETF_BOARD_LOTS
             fallback = HK_DEFENSIVE_SYMBOL
 
@@ -392,8 +410,8 @@ def build_weekly_plan(
     hk_sum = sum((t.portfolio_weight for t in targets_list if t.market == "HK"), Decimal(0))
     total_invested = us_sum + hk_sum
 
-    shy_ref = Decimal(str(us_data.eod_by_symbol[US_DEFENSIVE_SYMBOL][-1].raw_close))
-    hk_mm_ref = Decimal(str(hk_bars[HK_DEFENSIVE_SYMBOL][target_asof].raw_close))
+    shy_ref = _us_ref_close_on_asof(us_data.eod_by_symbol, US_DEFENSIVE_SYMBOL, target_asof)
+    hk_mm_ref = _hk_ref_close_on_asof(hk_bars, HK_DEFENSIVE_SYMBOL, target_asof)
     gen_ts = (generated_at_utc or datetime.now(UTC)).isoformat()
 
     draft = WeeklyPlan(

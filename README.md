@@ -13,7 +13,7 @@ At each completed Friday close, `fundconnect-bot plan` evaluates four point-in-t
 | `us_macro_allweather_v1` | **35%** | 10 US Macro/Tactical ETFs (`QQQ`, `SPY`, `SCHD`, `GLD`, `IEF`, `TLT`, `SHY`, `IBIT`, `KWEB`, `ASHR`) + Cryptoracle BTC 1d sentiment (`+15m` lag) | `SHY.US` |
 | `us_sector_quality_mom_v1` | **35%** | 48 US large-cap equities across 8 sector groups + strict SEC EDGAR `acceptedDate` PIT quarterly fundamentals (`180d` TTL) | `SHY.US` |
 | `hk_etf_southbound_rot_v1` | **20%** | 6 HKD-counter HKEX ETFs (`2800.HK`, `2828.HK`, `3033.HK`, `2823.HK`, `3081.HK`, `3053.HK`) + Tushare Pro Southbound CCASS/GGT breadth (`T+1 08:30 HKT`) | `3053.HK` |
-| `hk_southbound_bluechip_v1` | **10%** | 45 HKD-counter Southbound blue chips + CCASS `hk_hold` abnormal flow, persistence, and anti-crowding filters | `3053.HK` |
+| `hk_southbound_bluechip_v1` | **10%** | 47 HKD-counter Southbound blue chips + CCASS `hk_hold` abnormal flow, persistence, and anti-crowding filters | `3053.HK` |
 
 When `--sync-ibkr-holdings` is supplied on subsequent weeks, live IBKR holdings and the prior week's plan diagnostics are mapped back into per-sleeve weights so rank-buffer hysteresis (Top-11 HK blue-chip buffer, `+0.20` US SQM retention bonus) and drift-band turnover gates operate seamlessly in live trading. On initial cold start (`0` HK stocks held), the engine automatically runs pure cross-sectional entry selection.
 

@@ -94,6 +94,10 @@ def compute_us_macro_targets(
     china_cap: float = 0.08,
 ) -> tuple[dict[str, Decimal], dict[str, Any]]:
     """Compute `us_macro_allweather_v1` sleeve weights as of `asof_date` close."""
+    shy_bars = [b for b in eod_by_symbol.get("SHY.US", ()) if b.session <= asof_date]
+    if not shy_bars or shy_bars[-1].session != asof_date:
+        raise ValueError(f"SHY.US lacks EOD bar on {asof_date}")
+
     _, cutoff_utc = us_close_and_cutoff(asof_date)
 
     vaa: dict[str, float | None] = {}

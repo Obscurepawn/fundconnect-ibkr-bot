@@ -128,7 +128,7 @@ ETF_BOARD_LOTS: dict[str, int] = {
     "3053.HK": 1,
 }
 
-# Static fallback board lots for the 45 HKD Southbound blue-chip universe (verified from hk_basic).
+# Static fallback board lots for the 47 HKD Southbound blue-chip universe (verified from hk_basic).
 DEFAULT_HK_STOCK_BOARD_LOTS: dict[str, int] = {
     "0002.HK": 500,
     "0003.HK": 1000,

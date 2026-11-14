@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..config import (
     ETF_BOARD_LOTS,
@@ -20,7 +19,6 @@ from ..config import (
     US_MACRO_ETFS,
     ExecutionPolicyConfig,
 )
-from ..strategies.composite import PlanTarget, WeeklyPlan
 from .broker import (
     BrokerAdapter,
     CashSnap,
@@ -41,6 +39,9 @@ from .hkex_rules import (
     split_qty_into_lot_slices,
     to_ibkr_contract_fields,
 )
+
+if TYPE_CHECKING:
+    from ..strategies.composite import PlanTarget, WeeklyPlan
 
 type MarketCode = Literal["US", "HK"]
 _DEFAULT_POLICY_CONFIG = ExecutionPolicyConfig()
@@ -912,7 +913,18 @@ def _unit_cost_with_fee(spec: OrderSpec, config: ExecutionPolicyConfig) -> float
         fee_bps = config.hk_etf_fee_buffer_bps
     else:
         fee_bps = config.hk_stock_fee_buffer_bps
-    return float(spec.limit_price) * (1.0 + fee_bps / 10_000.0)
+    if (
+        spec.side == "BUY"
+        and spec.style != "PROTECTIVE_FLOOR_LIMIT"
+        and config.max_walk_steps > 0
+    ):
+        worst_px = max(
+            float(spec.limit_price),
+            spec.arrival_mid * (1.0 + config.max_slippage_bps / 10_000.0),
+        )
+    else:
+        worst_px = float(spec.limit_price)
+    return worst_px * (1.0 + fee_bps / 10_000.0)
 
 
 def compute_spendable_cash(
@@ -923,7 +935,7 @@ def compute_spendable_cash(
 ) -> float:
     """Compute non-borrowed spendable cash for Phase B buys (zero-margin-interest guard)."""
     if cash_snap.currency == "HKD" and config.require_settled_hkd:
-        base = min(cash_snap.settled_cash, cash_snap.available_funds)
+        base = min(cash_snap.total_cash, cash_snap.settled_cash, cash_snap.available_funds)
     else:
         base = min(cash_snap.total_cash, cash_snap.available_funds)
     return max(0.0, base - max(0.0, reserve_amount))
@@ -978,7 +990,7 @@ def _execute_orders_with_walk(
     *,
     dry_run: bool,
     config: ExecutionPolicyConfig,
-    sleep_fn: Any = time.sleep,
+    sleep_fn: Callable[[float], None] | None = None,
 ) -> list[FillReport]:
     reports: list[FillReport] = []
     for spec in orders:
@@ -989,9 +1001,12 @@ def _execute_orders_with_walk(
 
         cur_spec = spec
         for step in range(1, config.max_walk_steps + 1):
-            if config.poll_interval_sec > 0:
-                sleep_fn(config.poll_interval_sec)
-            rep = broker.poll_order(rep.order_id)
+            if sleep_fn is not None:
+                if config.poll_interval_sec > 0:
+                    sleep_fn(config.poll_interval_sec)
+                rep = broker.poll_order(rep.order_id, wait_sec=0.0)
+            else:
+                rep = broker.poll_order(rep.order_id, wait_sec=config.poll_interval_sec)
             if rep.status in ("FILLED", "CANCELLED"):
                 break
             q_map = broker.get_quotes([cur_spec.symbol])
@@ -1019,7 +1034,7 @@ def execute_market_rebalance(
     allow_fx_convert: bool = False,
     state_dir: Path | None = None,
     config: ExecutionPolicyConfig = _DEFAULT_POLICY_CONFIG,
-    sleep_fn: Any = time.sleep,
+    sleep_fn: Callable[[float], None] | None = None,
 ) -> ExecutionReport:
     """Run two-phase Sell-then-Buy execution with walk-limit repricing and state persistence."""
     exec_session = (
@@ -1044,11 +1059,16 @@ def execute_market_rebalance(
     open_orders = broker.get_open_orders()
     usdhkd = broker.get_usdhkd_rate(default=config.default_usdhkd_rate)
 
+    ccy_market: CurrencyCode = "HKD" if market == "HK" else "USD"
     defensive_sym = HK_DEFENSIVE_SYMBOL if market == "HK" else US_DEFENSIVE_SYMBOL
     needed_quote_syms = sorted(
         {
             *(t.symbol for t in plan.targets_for_market(market)),
-            *positions.keys(),
+            *(
+                sym
+                for sym, pos in positions.items()
+                if pos.currency == ccy_market and pos.quantity != 0
+            ),
             defensive_sym,
         }
     )

@@ -280,9 +280,19 @@ class IbAsyncBrokerAdapter:
     def get_cash(self) -> dict[CurrencyCode, CashSnap]:
         _, ib = self._require_ib()
         values = ib.accountValues(self.config.account) if self.config.account else ib.accountValues()
-        by_ccy: dict[CurrencyCode, dict[str, float]] = {
-            "USD": {"total": 0.0, "settled": 0.0, "avail": 0.0},
-            "HKD": {"total": 0.0, "settled": 0.0, "avail": 0.0},
+        by_ccy: dict[CurrencyCode, dict[str, float | None]] = {
+            "USD": {
+                "cash_balance": None,
+                "total_cash_balance": None,
+                "settled": None,
+                "avail": None,
+            },
+            "HKD": {
+                "cash_balance": None,
+                "total_cash_balance": None,
+                "settled": None,
+                "avail": None,
+            },
         }
         for av in values:
             ccy_str = str(av.currency or "").upper()
@@ -294,8 +304,11 @@ class IbAsyncBrokerAdapter:
                 val = float(av.value)
             except (TypeError, ValueError):
                 continue
-            if tag in ("TotalCashBalance", "TotalCashValue", "CashBalance"):
-                by_ccy[ccy]["total"] = val
+            # Never use TotalCashValue (IBKR's base-currency cross-currency aggregate)
+            if tag == "CashBalance":
+                by_ccy[ccy]["cash_balance"] = val
+            elif tag == "TotalCashBalance":
+                by_ccy[ccy]["total_cash_balance"] = val
             elif tag == "SettledCash":
                 by_ccy[ccy]["settled"] = val
             elif tag == "AvailableFunds":
@@ -303,11 +316,18 @@ class IbAsyncBrokerAdapter:
 
         out: dict[CurrencyCode, CashSnap] = {}
         for ccy, m in by_ccy.items():
-            settled = m["settled"] if m["settled"] != 0.0 else m["total"]
-            avail = m["avail"] if m["avail"] != 0.0 else settled
+            cb = m["cash_balance"]
+            tcb = m["total_cash_balance"]
+            total = cb if cb is not None else (tcb if tcb is not None else 0.0)
+            # Preserve explicit 0.0 (or negative) SettledCash rather than overwriting with unsettled total
+            settled = m["settled"] if m["settled"] is not None else total
+            # IBKR emits AvailableFunds only in account Base Currency; for USD, T+1 trade-dated
+            # CashBalance funds same-settlement US T+1 buys, whereas HKD requires settled cash.
+            avail_raw = m["avail"]
+            avail = avail_raw if avail_raw is not None else (total if ccy == "USD" else settled)
             out[ccy] = CashSnap(
                 currency=ccy,
-                total_cash=m["total"],
+                total_cash=total,
                 settled_cash=settled,
                 available_funds=avail,
             )

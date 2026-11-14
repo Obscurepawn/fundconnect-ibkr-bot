@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import subprocess
 import sys
 import types
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -42,7 +45,9 @@ from fundconnect_bot.execution.hkex_rules import (
 )
 from fundconnect_bot.execution.policy import (
     ActionCode,
+    apply_cash_cap_to_buys,
     build_execution_batch,
+    compute_spendable_cash,
     execute_market_rebalance,
 )
 from fundconnect_bot.strategies.composite import (
@@ -53,6 +58,7 @@ from fundconnect_bot.strategies.composite import (
     load_weekly_plan,
     save_weekly_plan,
 )
+from fundconnect_bot.strategies.us_macro import compute_us_macro_targets
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 US_CACHE_DIR = Path("/home/obscure/TradeMaster/data/fundconnect_us")
@@ -928,3 +934,281 @@ def test_cli_plan_simulate_monday_and_holiday_enforcement(
     )
     assert rc_def == 0
     assert "HOLIDAY_DEFERRED" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# 15–18. Regression Tests for Subprocess Import Order, IBKR Cash Accounting,
+#        ib_async Event-Loop Polling, Worst-Case Cash Cap & Closed-Market Quotes
+# ---------------------------------------------------------------------------
+def test_clean_subprocess_imports_no_circular_dependency() -> None:
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+    for stmt in (
+        "from fundconnect_bot.strategies import build_weekly_plan; assert callable(build_weekly_plan)",
+        "from fundconnect_bot.execution import execute_market_rebalance; assert callable(execute_market_rebalance)",
+    ):
+        proc = subprocess.run(
+            [sys.executable, "-c", stmt],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, f"Subprocess import failed for `{stmt}`:\n{proc.stderr}"
+
+
+def test_ib_async_get_cash_accounting_edge_cases(monkeypatch: pytest.MonkeyPatch) -> None:
+    @dataclass
+    class FakeAccountValue:
+        tag: str
+        value: str
+        currency: str
+
+    current_values: list[FakeAccountValue] = []
+
+    class FakeIB:
+        def connect(self, **_: Any) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            return None
+
+        def accountValues(self, *_: Any) -> list[FakeAccountValue]:
+            return list(current_values)
+
+    fake_mod = types.ModuleType("ib_async")
+    fake_mod.IB = FakeIB  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ib_async", fake_mod)
+
+    with IbAsyncBrokerAdapter() as adapter:
+        # Case 2a & 2b: USD-base account right after T+2 IDEALPRO USD->HKD conversion:
+        # TotalCashValue(USD) aggregates USD+HKD ($1,000,000), while CashBalance(USD)=$700,000
+        # and SettledCash(HKD)=0.0 despite CashBalance(HKD)=2,340,000.
+        current_values = [
+            FakeAccountValue("TotalCashValue", "1000000.00", "USD"),
+            FakeAccountValue("CashBalance", "700000.00", "USD"),
+            FakeAccountValue("SettledCash", "700000.00", "USD"),
+            FakeAccountValue("AvailableFunds", "1000000.00", "USD"),
+            FakeAccountValue("CashBalance", "2340000.00", "HKD"),
+            FakeAccountValue("TotalCashBalance", "2340000.00", "HKD"),
+            FakeAccountValue("SettledCash", "0.00", "HKD"),
+        ]
+        cash_a = adapter.get_cash()
+        assert cash_a["USD"].total_cash == pytest.approx(700_000.0)
+        assert cash_a["HKD"].total_cash == pytest.approx(2_340_000.0)
+        assert cash_a["HKD"].settled_cash == pytest.approx(0.0)
+        assert compute_spendable_cash(cash_a["HKD"]) == pytest.approx(0.0)
+
+        # Case 2c: HKD-base account after Monday Phase A sells SGOV.US:
+        # IBKR emits AvailableFunds only in HKD (no AvailableFunds row for USD),
+        # CashBalance(USD)=1,000,000 (T+1 trade-dated), SettledCash(USD)=29.16.
+        current_values = [
+            FakeAccountValue("CashBalance", "1000000.00", "USD"),
+            FakeAccountValue("SettledCash", "29.16", "USD"),
+            FakeAccountValue("CashBalance", "0.00", "HKD"),
+            FakeAccountValue("SettledCash", "0.00", "HKD"),
+            FakeAccountValue("AvailableFunds", "7800000.00", "HKD"),
+        ]
+        cash_c = adapter.get_cash()
+        assert cash_c["USD"].total_cash == pytest.approx(1_000_000.0)
+        assert cash_c["USD"].settled_cash == pytest.approx(29.16)
+        assert cash_c["USD"].available_funds == pytest.approx(1_000_000.0)
+        assert compute_spendable_cash(cash_c["USD"]) == pytest.approx(1_000_000.0)
+        assert compute_spendable_cash(cash_c["HKD"]) == pytest.approx(0.0)
+
+
+def test_ib_async_walk_limit_pumps_ib_sleep_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleep_calls: list[float] = []
+
+    @dataclass
+    class FakeStock:
+        symbol: str
+        exchange: str
+        currency: str
+
+    @dataclass
+    class FakeLimitOrder:
+        action: str
+        totalQuantity: int
+        lmtPrice: float
+        tif: str = "DAY"
+        orderRef: str = ""
+        transmit: bool = True
+        account: str = ""
+        algoStrategy: str = ""
+        algoParams: list[Any] = field(default_factory=list)
+        orderId: int = 88
+
+    @dataclass
+    class FakeOrderStatus:
+        status: str = "Submitted"
+        filled: float = 0.0
+        remaining: float = 100.0
+        avgFillPrice: float = 0.0
+
+    @dataclass
+    class FakeTrade:
+        contract: Any
+        order: Any
+        orderStatus: FakeOrderStatus
+
+    class FakeIB:
+        def __init__(self) -> None:
+            self.active_trade: FakeTrade | None = None
+
+        def connect(self, **_: Any) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            return None
+
+        def qualifyContracts(self, *contracts: Any) -> list[Any]:
+            return list(contracts)
+
+        def sleep(self, sec: float) -> None:
+            sleep_calls.append(sec)
+            # Simulate TWS fill arriving while ib.sleep(poll_interval_sec) pumps socket events!
+            if sec >= 1.5 and self.active_trade is not None:
+                self.active_trade.orderStatus.status = "Filled"
+                self.active_trade.orderStatus.filled = float(self.active_trade.order.totalQuantity)
+                self.active_trade.orderStatus.remaining = 0.0
+                self.active_trade.orderStatus.avgFillPrice = float(self.active_trade.order.lmtPrice)
+
+        def portfolio(self, *_: Any) -> list[Any]:
+            return []
+
+        def accountValues(self, *_: Any) -> list[Any]:
+            return [
+                types.SimpleNamespace(tag="CashBalance", value="50000.0", currency="USD"),
+                types.SimpleNamespace(tag="SettledCash", value="50000.0", currency="USD"),
+                types.SimpleNamespace(tag="AvailableFunds", value="50000.0", currency="USD"),
+            ]
+
+        def reqOpenOrders(self) -> None:
+            return None
+
+        def openTrades(self) -> list[Any]:
+            return []
+
+        def reqTickers(self, *contracts: Any) -> list[Any]:
+            out = []
+            for c in contracts:
+                if getattr(c, "pair", "") == "USDHKD":
+                    out.append(types.SimpleNamespace(bid=7.80, ask=7.80, close=7.80, last=7.80))
+                else:
+                    out.append(
+                        types.SimpleNamespace(bid=199.80, ask=200.20, close=200.00, last=200.00)
+                    )
+            return out
+
+        def placeOrder(self, contract: Any, order: Any) -> FakeTrade:
+            tr = FakeTrade(
+                contract=contract,
+                order=order,
+                orderStatus=FakeOrderStatus(
+                    status="Submitted", filled=0.0, remaining=float(order.totalQuantity)
+                ),
+            )
+            self.active_trade = tr
+            return tr
+
+    fake_mod = types.ModuleType("ib_async")
+    fake_mod.Stock = FakeStock  # type: ignore[attr-defined]
+    fake_mod.Forex = lambda pair: types.SimpleNamespace(pair=pair)  # type: ignore[attr-defined]
+    fake_mod.TagValue = lambda t, v: (t, v)  # type: ignore[attr-defined]
+    fake_mod.LimitOrder = FakeLimitOrder  # type: ignore[attr-defined]
+    fake_mod.IB = FakeIB  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ib_async", fake_mod)
+
+    plan = _single_us_stock_plan("AAPL.US", "0.20000000")
+    cfg = ExecutionPolicyConfig(poll_interval_sec=1.75)
+    with IbAsyncBrokerAdapter() as adapter:
+        rep = execute_market_rebalance(
+            plan,
+            adapter,
+            market="US",
+            dry_run=False,
+            config=cfg,
+        )
+    assert any(abs(s - 1.75) < 1e-9 for s in sleep_calls)
+    assert all(f.status == "FILLED" for f in rep.phase_b_fills)
+
+
+def test_worst_case_walk_cash_cap_closed_market_quote_filter_and_missing_shy_bar() -> None:
+    # 4a: Worst-case walk-limit (+25 bps) + fee buffer reservation prevents negative cash on walk
+    spec = OrderSpec(
+        intent_id="cap-1",
+        symbol="AAPL.US",
+        ibkr_symbol="AAPL",
+        exchange="SMART",
+        currency="USD",
+        asset_class="stock",
+        side="BUY",
+        quantity=100,
+        lot_size=1,
+        limit_price=Decimal("100.08"),
+        arrival_mid=100.00,
+        style="ADAPTIVE_NORMAL",
+        phase="PHASE_B_BUY",
+    )
+    cfg = ExecutionPolicyConfig()
+    # $10,030 < 100 * 100.25 * 1.0015 ($10,040.04), so 100 shares must be scaled down to 99 shares!
+    capped, warnings = apply_cash_cap_to_buys([spec], spendable_cash=10_030.0, config=cfg)
+    assert len(capped) == 1
+    assert capped[0].quantity == 99
+    assert len(warnings) == 1
+
+    # 4b: Executing HK market must NOT request quotes for closed US holdings (SGOV.US / AAPL.US)
+    requested_quote_batches: list[list[str]] = []
+
+    class TrackingMockBroker(MockBrokerAdapter):
+        def get_quotes(self, symbols: Sequence[str]) -> dict[str, Quote]:
+            requested_quote_batches.append(list(symbols))
+            return super().get_quotes(symbols)
+
+    hk_plan = _make_minimal_plan(
+        market="HK",
+        targets=[
+            PlanTarget(
+                symbol="0003.HK",
+                ibkr_symbol="3",
+                market="HK",
+                exchange="SEHK",
+                currency="HKD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.10000000"),
+                sleeve_contributions={"hk_southbound_bluechip_v1": "0.10000000"},
+                ref_close=Decimal("7.39"),
+                lot_size=1000,
+                defensive_fallback="3053.HK",
+                is_defensive_fallback=False,
+            )
+        ],
+    )
+    broker = TrackingMockBroker(
+        positions={
+            "AAPL.US": PositionSnap("AAPL.US", 100, 200.0, 220.0, "USD"),
+            "0003.HK": PositionSnap("0003.HK", 1000, 7.30, 7.39, "HKD"),
+        },
+        cash={
+            "USD": CashSnap("USD", 50_000.0, 50_000.0, 50_000.0),
+            "HKD": CashSnap("HKD", 200_000.0, 200_000.0, 200_000.0),
+        },
+        quotes={
+            "0003.HK": Quote("0003.HK", bid=7.38, ask=7.40, last=7.39, prev_close=7.39),
+            "3053.HK": Quote("3053.HK", bid=1195.55, ask=1195.65, last=1195.60, prev_close=1195.60),
+        },
+    )
+    hk_rep = execute_market_rebalance(
+        hk_plan,
+        broker,
+        market="HK",
+        dry_run=False,
+        config=ExecutionPolicyConfig(poll_interval_sec=0.0),
+    )
+    assert all(not sym.endswith(".US") for batch in requested_quote_batches for sym in batch)
+    # Closed AAPL.US position ($22,000) + $50,000 USD cash + HKD assets still valued accurately
+    assert hk_rep.batch.total_equity_usd > 72_000.0
+
+    # 4c: Missing SHY.US bar on asof_date raises explicit ValueError instead of silent empty dict
+    with pytest.raises(ValueError, match="SHY.US lacks EOD bar"):
+        compute_us_macro_targets(date(2026, 11, 13), {}, [])
