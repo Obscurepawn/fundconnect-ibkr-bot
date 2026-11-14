@@ -1,0 +1,6 @@
+tools/
+states/
+*.dot
+*.pdf
+*_TTrace_*
+MC.out

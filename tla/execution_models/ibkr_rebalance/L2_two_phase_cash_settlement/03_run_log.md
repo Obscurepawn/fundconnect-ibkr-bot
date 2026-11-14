@@ -1,0 +1,20 @@
+# 03_run_log — L2_TwoPhaseCashSettlement
+
+| # | UTC | cmd / cfg | states (gen / distinct) | depth | wall | verdict | notes |
+|---|---|---|---|---|---|---|---|
+| 1 | 2026-11-14T22:46:15Z | `run_tlc.sh L2_TwoPhaseCashSettlement.tla L2_TwoPhaseCashSettlement_base.cfg --det` | 2 / 1 | 1 | 0s | runtime error (exit 75) | `phase_a_req` missing from `UNCHANGED` in `ExecPhaseASellFilled`; added `phase_a_req` to `UNCHANGED`. |
+| 2 | 2026-11-14T22:46:27Z | `run_tlc.sh L2_TwoPhaseCashSettlement.tla L2_TwoPhaseCashSettlement_usd_settled_cash.cfg --det` | 7 / 7 | 7 | 1s | VIOLATED (`ZeroMarginLoanSettledCash`) | Candidate L2-B1: `compute_spendable_cash` (`policy.py:961-965`) ignores `eff_cash.settled_cash` when `currency == "USD"`, spending unsettled `T+2` FX USD on `T+1` US buys (`settled_cash["USD"] = -80` on `day = 1`). |
+| 3 | 2026-11-14T22:46:46Z | `coverage.sh L2_TwoPhaseCashSettlement.tla L2_TwoPhaseCashSettlement_base.cfg --det` | 58 / 52 | 9 | 1s | PASS (10/10 actions fired) | Verified 0 zero-coverage actions across all 4 multi-currency settlement scenarios. |
+| 4 | 2026-11-14T22:46:52Z | `run_tlc.sh L2_TwoPhaseCashSettlement.tla L2_TwoPhaseCashSettlement_base.cfg --det` | 58 / 52 | 9 | 1s | PASS (0 errors) | `TypeOK` and `BuyBudgetWithinCap` hold across all scenarios (`SAME_SESSION_US`, `HK_UNSETTLED_FX_HKD`, `UNSETTLED_FX_USD`, `MONDAY_BOOTSTRAP_FX`). |
+| 5 | 2026-11-14T22:46:55Z | `run_tlc.sh L2_TwoPhaseCashSettlement.tla L2_TwoPhaseCashSettlement_virtual_fx.cfg --det` | 6 / 6 | 4 | 1s | VIOLATED (`NoUnintendedVirtualFxPosition`) | Candidate L2-A: `convert_usd_to_hkd` (`broker.py:514-526`) places `Forex("USDHKD")` on default `IDEALPRO` instead of `FXCONV`, opening a Virtual FX Position (`virtual_fx_open = TRUE`). |
+| 6 | 2026-11-14T22:46:56Z | `run_tlc.sh L2_TwoPhaseCashSettlement.tla L2_TwoPhaseCashSettlement_fx_unguarded.cfg --det` | 15 / 15 | 8 | 1s | VIOLATED (`ZeroMarginLoanSettledCash`) | Candidate L2-B2: `execute_market_rebalance` (`policy.py:1145-1148`) invokes `convert_usd_to_hkd(bootstrap_fx_usd)` without checking `settled_cash["USD"]` or realized Phase A proceeds; when `SGOV.US` stays `WORKING`, `settled_cash["USD"] = -30` on `day = 2`. |
+
+## Fix validation (`L2_TwoPhaseCashSettlement_v2`)
+
+| # | UTC | cmd / cfg | states (gen / distinct) | depth | wall | verdict | notes |
+|---|---|---|---|---|---|---|---|
+| 7 | 2026-11-14T23:29:03Z | `run_tlc.sh L2_TwoPhaseCashSettlement_v2.tla L2_TwoPhaseCashSettlement_v2.cfg --det` | 55 / 49 | 9 | 1s | PASS (0 errors) | All 4 invariants (`TypeOK`, `BuyBudgetWithinCap`, `NoUnintendedVirtualFxPosition`, `ZeroMarginLoanSettledCash`) hold across the one-way `USD -> HKD` domain (`SAME_SESSION_US`, `HK_UNSETTLED_FX_HKD`, `MONDAY_BOOTSTRAP_FX` with both filled and `WORKING` Phase A sells, plus accepted and rejected `FXCONV` orders). |
+| 8 | 2026-11-14T23:29:04Z | `run_tlc.sh L2_TwoPhaseCashSettlement_v2.tla L2_TwoPhaseCashSettlement_v2_scale.cfg --det` | 91 / 81 | 9 | 0s | PASS (0 errors) | High-effort scaling check adding `HK_SAME_SESSION_ROTATION` (Week-2+ SEHK `T+2` sale isolated from unsettled `T+2` FX HKD) and `TUESDAY_SETTLED_BOOTSTRAP_FX`. |
+| 9 | 2026-11-14T23:29:05Z | `run_tlc.sh L2_TwoPhaseCashSettlement_v2.tla L2_TwoPhaseCashSettlement_virtual_fx.cfg --det` | 26 / 23 | 9 | 1s | PASS (0 errors) | Direct re-run of v1 `L2-A` targeted config against `L2_TwoPhaseCashSettlement_v2.tla`. |
+| 10 | 2026-11-14T23:29:06Z | `run_tlc.sh L2_TwoPhaseCashSettlement_v2.tla L2_TwoPhaseCashSettlement_fx_unguarded.cfg --det` | 26 / 23 | 9 | 1s | PASS (0 errors) | Direct re-run of v1 `L2-B2` targeted config against `L2_TwoPhaseCashSettlement_v2.tla`. |
+| 11 | 2026-11-14T23:29:07Z | `coverage.sh L2_TwoPhaseCashSettlement_v2.tla --det` & `_v2_scale.cfg --det` | 55 / 49 & 91 / 81 | 9 | 2s | PASS (12/12 actions fired in both cfgs) | Confirmed 0 zero-coverage actions across all settlement, FX guard, and rejection branches. |

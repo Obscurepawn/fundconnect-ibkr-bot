@@ -1,0 +1,18 @@
+# 03_run_log — L3_CrashRetryIdempotency
+
+| # | UTC | cmd / cfg | states (gen / distinct) | depth | wall | verdict | notes |
+|---|---|---|---|---|---|---|---|
+| 1 | 2026-11-14T22:51:39Z | `coverage.sh L3_CrashRetryIdempotency.tla L3_CrashRetryIdempotency_base.cfg --det` | 1,873 / 1,586 | 16 | 1s | PASS (18/18 actions fired) | Verified 0 zero-coverage actions across all Run 1 + inter-run TWS + Run 2 crash/retry actions. |
+| 2 | 2026-11-14T22:51:47Z | `run_tlc.sh L3_CrashRetryIdempotency.tla L3_CrashRetryIdempotency_base.cfg --det` | 1,873 / 1,586 | 16 | 0s | PASS (0 errors) | `TypeOK` holds across full multi-run crash/interleaving state space. |
+| 3 | 2026-11-14T22:51:50Z | `run_tlc.sh L3_CrashRetryIdempotency.tla L3_CrashRetryIdempotency_client_id.cfg --det` | 41 / 41 | 7 | 1s | VIOLATED (`NoDoubleOrderAcrossClientIds`) | Candidate L3-A: `get_open_orders` (`broker.py:338`) calls `ib.reqOpenOrders()`, missing `Working` order on `clientId = 26` when Run 2 connects as `clientId = 27` after crash before `save_execution_state`. |
+| 4 | 2026-11-14T22:51:53Z | `run_tlc.sh L3_CrashRetryIdempotency.tla L3_CrashRetryIdempotency_stranded_working.cfg --det` | 374 / 347 | 15 | 1s | VIOLATED (`NoStrandedUnfilledTargetOnRetry`) | Candidate L3-B: `policy.py:1125-1126, 1217-1218` persists `"WORKING"` / `"PARTIAL"` in `completed_intents`; after TWS cancels the working order, Run 2 skips `BUY_INTENT` (`policy.py:536-537`), stranding `pos_buy = 0 < 100`. |
+| 5 | 2026-11-14T22:51:55Z | `run_tlc.sh L3_CrashRetryIdempotency.tla L3_CrashRetryIdempotency_scaled_buy.cfg --det` | 380 / 351 | 15 | 1s | VIOLATED (`NoScaledBuyPermanentUnderfill`) | Candidate L3-C: `apply_cash_cap_to_buys` (`policy.py:1005`) scales buy from `100` to `50` while keeping `BUY_INTENT`; filling `50/50` records `BUY_INTENT` (`FILLED`) in `completed_intents`, permanently blocking the remaining `50` shares in Run 2 even after Phase A finishes filling. |
+| 6 | 2026-11-14T22:51:56Z | `run_tlc.sh L3_CrashRetryIdempotency.tla L3_CrashRetryIdempotency_dup_fx.cfg --det` | 237 / 225 | 12 | 1s | VIOLATED (`NoDuplicateFxConversionOnRetry`) | Candidate L3-D: `execute_market_rebalance` (`policy.py:1145-1148`) neither checks nor records `bootstrap_fx_usd` in `ExecutionState`, submitting a second `30` USD conversion (`fx_converted_total = 60 > 30`) on Run 2 retry. |
+
+## Fix validation (`L3_CrashRetryIdempotency_v2`)
+
+| # | UTC | cmd / cfg | states (gen / distinct) | depth | wall | verdict | notes |
+|---|---|---|---|---|---|---|---|
+| 7 | 2026-11-14T23:34:25Z | `run_tlc.sh L3_CrashRetryIdempotency_v2.tla L3_CrashRetryIdempotency_v2.cfg --det` | 3,012 / 2,452 | 17 | 1s | PASS (0 errors) | All 5 invariants (`TypeOK`, `NoDoubleOrderAcrossClientIds`, `NoStrandedUnfilledTargetOnRetry`, `NoScaledBuyPermanentUnderfill`, `NoDuplicateFxConversionOnRetry`) hold across same/cross-`clientId` failover (`26`, `27`, `99` open FX), Phase A & B crashes, partial sells, working order fills/cancels, and FX retries. |
+| 8 | 2026-11-14T23:34:26Z | `run_tlc.sh L3_CrashRetryIdempotency_v2.tla L3_CrashRetryIdempotency_v2_scale.cfg --det` | 4,518 / 3,678 | 17 | 0s | PASS (0 errors) | High-effort scaling check (`InitSellQty = 200`, `TargetBuyQty = 200`, `BootstrapFxUsd = 50`, `Run2ClientIds = {0, 26, 27}`). |
+| 9 | 2026-11-14T23:34:30Z | `coverage.sh L3_CrashRetryIdempotency_v2.tla --all-cfgs --det` | 3,012 / 2,452 & 4,518 / 3,678 (+ 6 v1 cfgs) | 17 | 4s | PASS (18/18 actions fired in all 8 cfgs) | Confirmed 0 zero-coverage actions across `_v2.cfg`, `_v2_scale.cfg`, and all 6 v1 configs (`_client_id.cfg`, `_stranded_working.cfg`, `_scaled_buy.cfg`, `_dup_fx.cfg`, `_base.cfg`, `.cfg`). |

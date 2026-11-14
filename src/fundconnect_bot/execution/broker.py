@@ -257,6 +257,9 @@ class IbAsyncBrokerAdapter:
         out: dict[str, PositionSnap] = {}
         portfolio_items = ib.portfolio(self.config.account) if self.config.account else ib.portfolio()
         for item in portfolio_items:
+            sec_type = str(getattr(item.contract, "secType", "STK") or "STK").upper()
+            if sec_type not in ("", "STK"):
+                continue
             ccy_raw = str(item.contract.currency or "").upper()
             if ccy_raw not in ("USD", "HKD"):
                 continue
@@ -335,23 +338,40 @@ class IbAsyncBrokerAdapter:
 
     def get_open_orders(self) -> list[OpenOrderSnap]:
         _, ib = self._require_ib()
-        ib.reqOpenOrders()
+        req_all = getattr(ib, "reqAllOpenOrders", None)
+        if callable(req_all):
+            req_all()
+        else:
+            ib.reqOpenOrders()
         snaps: list[OpenOrderSnap] = []
         for trade in ib.openTrades():
+            ib_status = str(trade.orderStatus.status or "Submitted")
+            if ib_status in ("Filled", "Cancelled", "ApiCancelled", "Inactive"):
+                continue
             ccy_raw = str(trade.contract.currency or "").upper()
             if ccy_raw not in ("USD", "HKD"):
                 continue
-            try:
-                canon = from_ibkr_position_symbol(str(trade.contract.symbol), ccy_raw)
-            except ValueError:
-                continue
+            sec_type = str(getattr(trade.contract, "secType", "STK") or "STK").upper()
+            raw_sym = str(trade.contract.symbol or "")
+            if sec_type == "CASH":
+                if (raw_sym.upper(), ccy_raw) != ("USD", "HKD"):
+                    continue
+                canon = "USD.HKD"
+            else:
+                try:
+                    canon = from_ibkr_position_symbol(raw_sym, ccy_raw)
+                except ValueError:
+                    continue
             action = str(trade.order.action or "").upper()
             if action not in ("BUY", "SELL"):
                 continue
             side: OrderSide = "SELL" if action == "SELL" else "BUY"
             tot = round(float(trade.order.totalQuantity or 0))
             filled = round(float(trade.orderStatus.filled or 0))
-            rem = max(0, round(float(trade.orderStatus.remaining or (tot - filled))))
+            raw_rem = trade.orderStatus.remaining
+            rem = max(0, round(float(raw_rem)) if raw_rem is not None else (tot - filled))
+            if rem <= 0:
+                continue
             lmt = Decimal(str(trade.order.lmtPrice or "0"))
             snaps.append(
                 OpenOrderSnap(
@@ -362,7 +382,7 @@ class IbAsyncBrokerAdapter:
                     filled_qty=filled,
                     remaining_qty=rem,
                     limit_price=lmt,
-                    status=str(trade.orderStatus.status or "Submitted"),
+                    status=ib_status,
                     client_ref=str(trade.order.orderRef or ""),
                 )
             )
@@ -462,11 +482,52 @@ class IbAsyncBrokerAdapter:
         self, order_id: str, spec: OrderSpec, new_limit_price: Decimal
     ) -> FillReport:
         _, ib = self._require_ib()
-        trade, _, prev_cnt = self._trades_by_id[order_id]
+        trade, prev_spec, prev_cnt = self._trades_by_id[order_id]
+        ib_status = str(trade.orderStatus.status or "")
+        filled_now = round(float(trade.orderStatus.filled or 0))
+        if (
+            ib_status in ("Filled", "Cancelled", "ApiCancelled", "Inactive")
+            or filled_now >= spec.quantity
+        ):
+            return self._trade_to_report(order_id, trade, prev_spec, prev_cnt)
+
+        prev_lmt = trade.order.lmtPrice
+        prev_log_len = len(getattr(trade, "log", ()) or ())
+        saw_err_104 = False
+        oid_int = int(order_id) if order_id.isdigit() else -1
+
+        def _on_error(req_id: Any, error_code: Any, *_: Any) -> None:
+            nonlocal saw_err_104
+            if req_id == oid_int and error_code == 104:
+                saw_err_104 = True
+
+        err_ev = getattr(ib, "errorEvent", None)
+        subscribed = False
+        if err_ev is not None:
+            try:
+                err_ev += _on_error
+                subscribed = True
+            except TypeError:
+                subscribed = False
+        try:
+            trade.order.lmtPrice = float(new_limit_price)
+            ib.placeOrder(trade.contract, trade.order)
+            ib.sleep(0.5)
+        finally:
+            if subscribed and err_ev is not None:
+                err_ev -= _on_error
+
+        new_logs = (getattr(trade, "log", ()) or ())[prev_log_len:]
+        if saw_err_104 or any(
+            getattr(entry, "errorCode", 0) == 104
+            or "104" in str(getattr(entry, "message", ""))
+            for entry in new_logs
+        ):
+            trade.order.lmtPrice = prev_lmt
+            self._trades_by_id[order_id] = (trade, prev_spec, prev_cnt)
+            return self._trade_to_report(order_id, trade, prev_spec, prev_cnt)
+
         updated_spec = replace(spec, limit_price=new_limit_price)
-        trade.order.lmtPrice = float(new_limit_price)
-        ib.placeOrder(trade.contract, trade.order)
-        ib.sleep(0.5)
         cnt = prev_cnt + 1
         self._trades_by_id[order_id] = (trade, updated_spec, cnt)
         return self._trade_to_report(order_id, trade, updated_spec, cnt)
@@ -511,9 +572,9 @@ class IbAsyncBrokerAdapter:
                 settlement_warning=warning,
             )
         ib_mod, ib = self._require_ib()
-        fx_contract = ib_mod.Forex("USDHKD")
+        fx_contract = ib_mod.Forex("USDHKD", exchange="FXCONV")
         ib.qualifyContracts(fx_contract)
-        # Selling USD.HKD on IDEALPRO sells USD and buys HKD!
+        # Selling USD.HKD on FXCONV converts physical USD into HKD without creating a virtual FX position.
         fx_order = ib_mod.LimitOrder(
             action="SELL",
             totalQuantity=round(usd_amount),

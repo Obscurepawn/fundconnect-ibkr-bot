@@ -1002,7 +1002,16 @@ def apply_cash_cap_to_buys(
             continue
         cost = scaled_qty * uc
         if cost <= remaining + 1e-6:
-            capped.append(replace(o, quantity=scaled_qty))
+            capped_spec = (
+                replace(
+                    o,
+                    intent_id=f"{o.intent_id}:cap:{o.quantity}:{scaled_qty}",
+                    quantity=scaled_qty,
+                )
+                if scaled_qty < o.quantity
+                else o
+            )
+            capped.append(capped_spec)
             remaining = max(0.0, remaining - cost)
 
     return tuple(capped), warnings
@@ -1034,15 +1043,22 @@ def _execute_orders_with_walk(
             if rep.status in ("FILLED", "CANCELLED"):
                 break
             q_map = broker.get_quotes([cur_spec.symbol])
-            new_lmt = compute_walked_limit_price(
-                cur_spec, q_map.get(cur_spec.symbol), step, config
-            )
-            if new_lmt is None:
-                break
-            rep = broker.modify_order_limit(rep.order_id, cur_spec, new_lmt)
-            cur_spec = replace(cur_spec, limit_price=new_lmt)
+            rep = broker.poll_order(rep.order_id, wait_sec=0.0)
             if rep.status in ("FILLED", "CANCELLED"):
                 break
+            live_q = q_map.get(cur_spec.symbol)
+            new_lmt = compute_walked_limit_price(cur_spec, live_q, step, config)
+            if new_lmt is None:
+                if any(
+                    compute_walked_limit_price(cur_spec, live_q, later_step, config) is not None
+                    for later_step in range(step + 1, config.max_walk_steps + 1)
+                ):
+                    continue
+                break
+            rep = broker.modify_order_limit(rep.order_id, cur_spec, new_lmt)
+            if rep.status in ("FILLED", "CANCELLED"):
+                break
+            cur_spec = replace(cur_spec, limit_price=rep.final_limit_price)
         reports.append(rep)
     return reports
 
@@ -1122,7 +1138,7 @@ def execute_market_rebalance(
     )
     if not dry_run:
         for fr in phase_a_fills:
-            if fr.status in ("FILLED", "PARTIAL", "WORKING"):
+            if fr.status == "FILLED":
                 completed[fr.intent_id] = fr.to_dict()
         if state_path is not None:
             save_execution_state(
@@ -1142,17 +1158,99 @@ def execute_market_rebalance(
 
     # Optional FX conversion during US bootstrap
     fx_report: FxConversionReport | None = None
+    fx_executed_this_run = False
+    reserve_usd = 0.0
     if market == "US" and bootstrap_fx_usd > 0.0:
-        if allow_fx_convert:
-            fx_report = broker.convert_usd_to_hkd(bootstrap_fx_usd, dry_run=dry_run)
-            alerts.append(fx_report.settlement_warning)
+        fx_intent_id = _make_intent_id(plan.plan_sha256, exec_session, "US", "USD.HKD", "SELL", 1)
+        fx_done_in_state = fx_intent_id in completed
+        fx_open_working = any(
+            oo.symbol == "USD.HKD" and oo.side == "SELL" and oo.remaining_qty > 0
+            for oo in open_orders
+        )
+        if dry_run:
+            if allow_fx_convert:
+                fx_report = broker.convert_usd_to_hkd(bootstrap_fx_usd, dry_run=True)
+                alerts.append(fx_report.settlement_warning)
+            else:
+                reserve_usd = bootstrap_fx_usd
+                alerts.append(
+                    f"[FX_RESERVE_NOTE] Reserved ${bootstrap_fx_usd:,.2f} USD unspent for HK sleeve; "
+                    f"pass --allow-fx-convert (after T+1 US settlement for zero margin interest) to convert USD.HKD."
+                )
+        elif fx_done_in_state or fx_open_working:
+            reserve_usd = bootstrap_fx_usd if fx_open_working else 0.0
+            if allow_fx_convert:
+                prev_fx = completed.get(fx_intent_id, {})
+                fx_report = FxConversionReport(
+                    pair="USD.HKD",
+                    sell_currency="USD",
+                    buy_currency="HKD",
+                    sell_amount=float(prev_fx.get("sell_amount", round(bootstrap_fx_usd))),
+                    estimated_buy_amount=float(
+                        prev_fx.get(
+                            "estimated_buy_amount", round(bootstrap_fx_usd * usdhkd, 2)
+                        )
+                    ),
+                    rate=float(prev_fx.get("rate", usdhkd)),
+                    order_id=str(prev_fx.get("order_id", "OPEN-FX-USDHKD")),
+                    status="ALREADY_COMPLETED",
+                    settlement_warning=(
+                        "FX conversion already completed or working for this plan session; "
+                        "skipping duplicate USD.HKD conversion."
+                    ),
+                )
+                alerts.append(fx_report.settlement_warning)
+        elif allow_fx_convert:
+            pre_fx_c = cash.get("USD", CashSnap("USD", 0.0, 0.0, 0.0))
+            realized_sell_net_fx = _realized_sell_net_proceeds(
+                batch.phase_a_sells, phase_a_fills, config
+            )
+            pre_fx_total = max(after_sells_c.total_cash, pre_fx_c.total_cash + realized_sell_net_fx)
+            pre_fx_avail = max(
+                after_sells_c.available_funds, pre_fx_c.available_funds + realized_sell_net_fx
+            )
+            non_borrowed_usd = min(pre_fx_total, pre_fx_avail)
+            if non_borrowed_usd + 1e-6 < bootstrap_fx_usd:
+                reserve_usd = bootstrap_fx_usd
+                alerts.append(
+                    f"[ZERO_MARGIN_FX_GUARD] Non-borrowed USD cash ({non_borrowed_usd:,.2f}) < "
+                    f"requested FX conversion ({bootstrap_fx_usd:,.2f}); skipped USD.HKD "
+                    f"conversion to prevent margin borrowing."
+                )
+            else:
+                fx_report = broker.convert_usd_to_hkd(bootstrap_fx_usd, dry_run=False)
+                alerts.append(fx_report.settlement_warning)
+                if fx_report.status.upper() in ("INACTIVE", "CANCELLED", "APICANCELLED"):
+                    reserve_usd = bootstrap_fx_usd
+                else:
+                    fx_executed_this_run = True
+                    completed[fx_intent_id] = {
+                        "order_id": fx_report.order_id,
+                        "intent_id": fx_intent_id,
+                        "symbol": "USD.HKD",
+                        "side": "SELL",
+                        "sell_amount": fx_report.sell_amount,
+                        "estimated_buy_amount": fx_report.estimated_buy_amount,
+                        "rate": fx_report.rate,
+                        "status": fx_report.status,
+                    }
+                    if state_path is not None:
+                        save_execution_state(
+                            ExecutionState(
+                                plan_sha256=plan.plan_sha256,
+                                execution_session=exec_session,
+                                market=market,
+                                completed_intents=completed,
+                                updated_at_utc=datetime.now(UTC).isoformat(),
+                            ),
+                            state_path,
+                        )
         else:
+            reserve_usd = bootstrap_fx_usd
             alerts.append(
                 f"[FX_RESERVE_NOTE] Reserved ${bootstrap_fx_usd:,.2f} USD unspent for HK sleeve; "
                 f"pass --allow-fx-convert (after T+1 US settlement for zero margin interest) to convert USD.HKD."
             )
-
-    reserve_usd = bootstrap_fx_usd if (market == "US" and not allow_fx_convert) else 0.0
 
     if dry_run:
         # Simulate same-session Phase A sell proceeds (US T+1 -> US T+1, SEHK T+2 -> SEHK T+2)
@@ -1182,7 +1280,7 @@ def execute_market_rebalance(
             max(after_sells_c.settled_cash, pre_c.settled_cash + realized_sell_net),
         )
         eff_avail = max(after_sells_c.available_funds, pre_c.available_funds + realized_sell_net)
-        if ccy == "USD" and fx_report is not None and fx_report.status != "DRY_RUN":
+        if ccy == "USD" and fx_executed_this_run and fx_report is not None:
             post_fx_c = broker.get_cash().get("USD", after_sells_c)
             eff_total = max(0.0, min(post_fx_c.total_cash, eff_total - fx_report.sell_amount))
             eff_settled = max(
@@ -1202,6 +1300,8 @@ def execute_market_rebalance(
     capped_buys, cap_warnings = apply_cash_cap_to_buys(
         batch.phase_b_buys, spendable_cash=spendable, config=config
     )
+    if not dry_run and completed:
+        capped_buys = tuple(o for o in capped_buys if o.intent_id not in completed)
     alerts.extend(cap_warnings)
 
     # Phase B: Execute Capped Buys
@@ -1214,7 +1314,7 @@ def execute_market_rebalance(
     )
     if not dry_run:
         for fr in phase_b_fills:
-            if fr.status in ("FILLED", "PARTIAL", "WORKING"):
+            if fr.status == "FILLED":
                 completed[fr.intent_id] = fr.to_dict()
         if state_path is not None:
             save_execution_state(
