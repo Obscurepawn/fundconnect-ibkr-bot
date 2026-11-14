@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly HKEX 09:32 HKT Timer for FundConnect Execution (Auto Holiday Deferral)
+
+[Timer]
+OnCalendar=Mon,Tue,Wed *-*-* 09:32:00 Asia/Hong_Kong
+Persistent=false
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

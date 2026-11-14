@@ -1,0 +1,12 @@
+[Unit]
+Description=FundConnect IBKR US SMART Rebalance Execution (09:32 ET, DST & Holiday-Aware)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/fundconnect-ibkr-bot
+EnvironmentFile=%h/fundconnect-ibkr-bot/.env
+ExecStart=%h/fundconnect-ibkr-bot/.venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market US --live --use-adaptive --enforce-session-date --state-dir state
+StandardOutput=append:%h/fundconnect-ibkr-bot/logs/execute-us.log
+StandardError=append:%h/fundconnect-ibkr-bot/logs/execute-us.log

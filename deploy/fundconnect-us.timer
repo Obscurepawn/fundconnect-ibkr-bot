@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly US 09:32 America/New_York Timer for FundConnect Execution (DST-Safe & Holiday-Aware)
+
+[Timer]
+OnCalendar=Mon,Tue,Wed *-*-* 09:32:00 America/New_York
+Persistent=false
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,27 @@
+# Python environments & build artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets & environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime data caches, generated plans, and live execution state
+/data/
+/plans/
+/state/
+/logs/
+*.parquet
+*.duckdb
+*.duckdb.wal

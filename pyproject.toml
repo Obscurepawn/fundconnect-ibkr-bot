@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fundconnect-ibkr-bot"
+version = "0.1.0"
+description = "Standalone weekly Monday composite signal calculator and gap-safe IBKR TWS/Gateway execution engine (35% US Macro + 35% US SQM + 20% HK ETF + 10% HK Bluechip)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "exchange-calendars>=4.5",
+    "pyarrow>=15.0",
+]
+
+[project.optional-dependencies]
+ibkr = [
+    "ib_async>=1.0.0",
+]
+dev = [
+    "mypy>=1.11.0",
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+fundconnect-bot = "fundconnect_bot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fundconnect_bot"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = ["src"]
+packages = ["fundconnect_bot"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
