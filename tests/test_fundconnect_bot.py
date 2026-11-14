@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from fundconnect_bot.cli import _find_previous_plan_before
+from fundconnect_bot.cli import _find_previous_plan_before, _resolve_cache_dirs
 from fundconnect_bot.cli import main as cli_main
 from fundconnect_bot.config import (
     BOOTSTRAP_SOURCE_SYMBOL,
@@ -62,8 +62,18 @@ from fundconnect_bot.strategies.composite import (
 from fundconnect_bot.strategies.us_macro import compute_us_macro_targets
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-US_CACHE_DIR = Path("/home/obscure/TradeMaster/data/fundconnect_us")
-HK_CACHE_DIR = Path("/home/obscure/TradeMaster/data/fundconnect_hk")
+LOCAL_US_CACHE_DIR = Path("/home/obscure/fundconnect-ibkr-bot/data/us")
+LOCAL_HK_CACHE_DIR = Path("/home/obscure/fundconnect-ibkr-bot/data/hk")
+US_CACHE_DIR = (
+    LOCAL_US_CACHE_DIR
+    if (LOCAL_US_CACHE_DIR / "indexone").exists() or (LOCAL_US_CACHE_DIR / "us_eod.parquet").exists()
+    else Path("/home/obscure/TradeMaster/data/fundconnect_us")
+)
+HK_CACHE_DIR = (
+    LOCAL_HK_CACHE_DIR
+    if (LOCAL_HK_CACHE_DIR / "tushare").exists()
+    else Path("/home/obscure/TradeMaster/data/fundconnect_hk")
+)
 
 
 @pytest.fixture(scope="module")
@@ -1428,16 +1438,15 @@ def test_cli_plan_rerun_selects_strictly_older_previous_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert _resolve_cache_dirs(REPO_ROOT / "data", None, None) == (US_CACHE_DIR, HK_CACHE_DIR)
     rc_prev = cli_main(
         [
             "plan",
             "--asof",
             "2026-11-06",
             "--from-cache",
-            "--us-cache-dir",
-            str(US_CACHE_DIR),
-            "--hk-cache-dir",
-            str(HK_CACHE_DIR),
+            "--data-dir",
+            str(REPO_ROOT / "data"),
             "--out-dir",
             str(tmp_path),
         ]

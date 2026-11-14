@@ -1,6 +1,6 @@
 # MEMORY — `fundconnect-ibkr-bot`
 
-Running verification index for `/home/obscure/TradeMaster/studies/fundconnect-ibkr-bot` (`$WORKSPACE = tla/`).
+Running verification index for `/home/obscure/fundconnect-ibkr-bot` (`$WORKSPACE = tla/`).
 
 ## execution_models / ibkr_rebalance / L0_gap_sizing_and_hkex — PASS (2026-11-15)
 - Mode: transcription

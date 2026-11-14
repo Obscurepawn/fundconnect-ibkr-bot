@@ -4,7 +4,7 @@
 Mechanically verify the gap-protected sizing, HKEX microstructure rounding, IBKR TWS / `ib_async` walk-limit execution, multi-currency `T+1`/`T+2` zero-margin-interest cash settlement, and crash/retry idempotency of `fundconnect-ibkr-bot` (`src/fundconnect_bot/`).
 
 ## Source roots & exclusions
-- **Primary modeled source roots** (relative to `<repo-root>` = `/home/obscure/TradeMaster/studies/fundconnect-ibkr-bot`):
+- **Primary modeled source roots** (relative to `<repo-root>` = `/home/obscure/fundconnect-ibkr-bot`):
   - `src/fundconnect_bot/execution/policy.py` — 6-tier gap/shock state machine, defensive fallback redirection, two-phase sell-before-buy batch builder, walk-limit driver, zero-margin spendable cash & buy cash-cap scaler, and `ExecutionState` JSON persistence.
   - `src/fundconnect_bot/execution/broker.py` — `IbAsyncBrokerAdapter` (`ib_async` live socket wrapper for positions, `accountValues()` cash tags, `reqOpenOrders()` open orders, quotes, `placeOrder` placement/modification, and `USD.HKD` FX conversion) and `MockBrokerAdapter`.
   - `src/fundconnect_bot/execution/hkex_rules.py` — HKEX Second Schedule Spread Table (`Part A`, `Part B` `3053.HK`, `Part D` equity/gold ETFs), US Reg NMS `$0.01` tick rounding, `floor_to_lot`, `split_qty_into_lot_slices`, and SEHK leading-zero symbol stripping (`"0003.HK" <-> ("3", "SEHK", "HKD")`).
@@ -49,4 +49,4 @@ Mechanically verify the gap-protected sizing, HKEX microstructure rounding, IBKR
 
 ## Toolchain
 - Java: OpenJDK `21.0.11` (`java -version`).
-- TLC: `tla2tools.jar` `v1.8.0` at `/home/obscure/TradeMaster/studies/fundconnect-ibkr-bot/tla/tools/tla2tools.jar` (recorded in `tla/config.env`, `VIBE_TLA_EFFORT=high`).
+- TLC: `tla2tools.jar` `v1.8.0` at `/home/obscure/fundconnect-ibkr-bot/tla/tools/tla2tools.jar` (recorded in `tla/config.env`, `VIBE_TLA_EFFORT=high`).

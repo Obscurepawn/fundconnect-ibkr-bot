@@ -40,24 +40,24 @@ from .strategies.composite import (
     save_weekly_plan,
 )
 
+DEFAULT_LOCAL_DATA_DIR = Path("/home/obscure/fundconnect-ibkr-bot/data")
 DEFAULT_FALLBACK_US_CACHE = Path("/home/obscure/TradeMaster/data/fundconnect_us")
 DEFAULT_FALLBACK_HK_CACHE = Path("/home/obscure/TradeMaster/data/fundconnect_hk")
 
 
 def _resolve_cache_dirs(
-    data_dir: Path,
-    us_cache_dir: Path | None,
-    hk_cache_dir: Path | None,
+    data_dir: Path, us_cache_dir: Path | None, hk_cache_dir: Path | None
 ) -> tuple[Path, Path]:
+    us_sub, hk_sub = data_dir / "us", data_dir / "hk"
+    fb_us = DEFAULT_LOCAL_DATA_DIR / "us" if (DEFAULT_LOCAL_DATA_DIR / "us").exists() else DEFAULT_FALLBACK_US_CACHE
+    fb_hk = DEFAULT_LOCAL_DATA_DIR / "hk" if (DEFAULT_LOCAL_DATA_DIR / "hk").exists() else DEFAULT_FALLBACK_HK_CACHE
     us_dir = us_cache_dir or (
-        data_dir
-        if (data_dir / "us" / "us_eod.parquet").exists() or (data_dir / "us_eod.parquet").exists()
-        else (DEFAULT_FALLBACK_US_CACHE if DEFAULT_FALLBACK_US_CACHE.exists() else data_dir)
+        us_sub if (us_sub / "indexone").exists() or (us_sub / "prepared").exists() or (us_sub / "us_eod.parquet").exists()
+        else (data_dir if (data_dir / "us_eod.parquet").exists() or (data_dir / "indexone").exists() else (fb_us if fb_us.exists() else data_dir))
     )
     hk_dir = hk_cache_dir or (
-        data_dir
-        if (data_dir / "hk" / "tushare").exists() or (data_dir / "tushare").exists()
-        else (DEFAULT_FALLBACK_HK_CACHE if DEFAULT_FALLBACK_HK_CACHE.exists() else data_dir)
+        hk_sub if (hk_sub / "tushare").exists() or (hk_sub / "hk_eod.parquet").exists()
+        else (data_dir if (data_dir / "tushare").exists() else (fb_hk if fb_hk.exists() else data_dir))
     )
     return us_dir, hk_dir
 

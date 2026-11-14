@@ -4,7 +4,7 @@
 Mechanically verify the end-to-end execution stack of `fundconnect-ibkr-bot` (`src/fundconnect_bot/execution/{hkex_rules,policy,broker}.py` and `src/fundconnect_bot/cli.py`) as a 4-level compositional TLA+ ladder (`L0 -> L3`), grounded in official IBKR TWS API & `ib_async` runtime semantics (`docs/ibkr_tws_api_semantics.md`).
 
 ## Verified Source Scope & Exclusions
-- **Source root**: `/home/obscure/TradeMaster/studies/fundconnect-ibkr-bot`
+- **Source root**: `/home/obscure/fundconnect-ibkr-bot`
 - **Included modules**:
   - `src/fundconnect_bot/execution/hkex_rules.py` (`1-269`)
   - `src/fundconnect_bot/execution/policy.py` (`1-1240`)

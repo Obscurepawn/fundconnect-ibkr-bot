@@ -19,13 +19,11 @@ When `--sync-ibkr-holdings` is supplied on subsequent weeks, live IBKR holdings 
 
 ---
 
-## 2. Standalone Relocation & Installation
+## 2. Standalone Quickstart & Installation
 
-Move or clone this repository anywhere outside your research workspace and push it to your own private Git remote:
+Enter the standalone repository (`~/fundconnect-ibkr-bot`), optionally attach a private Git remote, and install into an isolated Python 3.12+ virtual environment:
 
 ```bash
-# Optional: move out of studies/ into your home or deployment directory
-mv /home/obscure/TradeMaster/studies/fundconnect-ibkr-bot ~/fundconnect-ibkr-bot
 cd ~/fundconnect-ibkr-bot
 
 # Optional: attach your private GitHub/GitLab remote

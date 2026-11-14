@@ -51,8 +51,18 @@ from fundconnect_bot.strategies.composite import (
     save_weekly_plan,
 )
 
-US_CACHE_DIR = Path("/home/obscure/TradeMaster/data/fundconnect_us")
-HK_CACHE_DIR = Path("/home/obscure/TradeMaster/data/fundconnect_hk")
+LOCAL_US_CACHE_DIR = Path("/home/obscure/fundconnect-ibkr-bot/data/us")
+LOCAL_HK_CACHE_DIR = Path("/home/obscure/fundconnect-ibkr-bot/data/hk")
+US_CACHE_DIR = (
+    LOCAL_US_CACHE_DIR
+    if (LOCAL_US_CACHE_DIR / "indexone").exists() or (LOCAL_US_CACHE_DIR / "us_eod.parquet").exists()
+    else Path("/home/obscure/TradeMaster/data/fundconnect_us")
+)
+HK_CACHE_DIR = (
+    LOCAL_HK_CACHE_DIR
+    if (LOCAL_HK_CACHE_DIR / "tushare").exists()
+    else Path("/home/obscure/TradeMaster/data/fundconnect_hk")
+)
 
 
 @pytest.fixture(scope="module")
