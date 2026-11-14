@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -18,6 +18,7 @@ from .config import (
     IbkrConnectionConfig,
     SleeveWeights,
 )
+from .data.calendars import latest_completed_week_end
 from .execution.broker import (
     CashSnap,
     IbAsyncBrokerAdapter,
@@ -172,17 +173,26 @@ def _find_latest_saved_plan(plans_dir: Path) -> Path | None:
     return dated[-1] if dated else None
 
 
+def _find_previous_plan_before(plans_dir: Path, target_asof: date) -> WeeklyPlan | None:
+    """Return the most recent valid saved `plan_*.json` strictly older than `target_asof`."""
+    if not plans_dir.exists():
+        return None
+    for cand_path in reversed(sorted(plans_dir.glob("plan_*.json"))):
+        try:
+            cand = load_weekly_plan(cand_path)
+        except ValueError:
+            continue
+        if cand.asof_date < target_asof:
+            return cand
+    return None
+
+
 def _cmd_plan(args: argparse.Namespace) -> int:
     asof = date.fromisoformat(args.asof) if args.asof else None
+    target_asof = asof or latest_completed_week_end("US", datetime.now(UTC).date())
     us_dir, hk_dir = _resolve_cache_dirs(args.data_dir, args.us_cache_dir, args.hk_cache_dir)
 
-    prev_plan: WeeklyPlan | None = None
-    existing_dated = sorted(args.out_dir.glob("plan_*.json")) if args.out_dir.exists() else []
-    if existing_dated:
-        try:
-            prev_plan = load_weekly_plan(existing_dated[-1])
-        except ValueError:
-            prev_plan = None
+    prev_plan = _find_previous_plan_before(args.out_dir, target_asof)
 
     live_state = LiveSleeveState()
     if args.sync_ibkr_holdings:

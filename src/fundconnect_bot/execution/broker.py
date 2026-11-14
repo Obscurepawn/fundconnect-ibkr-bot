@@ -321,10 +321,10 @@ class IbAsyncBrokerAdapter:
             total = cb if cb is not None else (tcb if tcb is not None else 0.0)
             # Preserve explicit 0.0 (or negative) SettledCash rather than overwriting with unsettled total
             settled = m["settled"] if m["settled"] is not None else total
-            # IBKR emits AvailableFunds only in account Base Currency; for USD, T+1 trade-dated
-            # CashBalance funds same-settlement US T+1 buys, whereas HKD requires settled cash.
+            # IBKR emits AvailableFunds only in account Base Currency; compute_spendable_cash
+            # separately enforces SettledCash on HKD when require_settled_hkd=True.
             avail_raw = m["avail"]
-            avail = avail_raw if avail_raw is not None else (total if ccy == "USD" else settled)
+            avail = avail_raw if avail_raw is not None else total
             out[ccy] = CashSnap(
                 currency=ccy,
                 total_cash=total,

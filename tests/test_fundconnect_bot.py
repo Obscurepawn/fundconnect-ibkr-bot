@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from fundconnect_bot.cli import _find_previous_plan_before
 from fundconnect_bot.cli import main as cli_main
 from fundconnect_bot.config import (
     BOOTSTRAP_SOURCE_SYMBOL,
@@ -1212,3 +1213,313 @@ def test_worst_case_walk_cash_cap_closed_market_quote_filter_and_missing_shy_bar
     # 4c: Missing SHY.US bar on asof_date raises explicit ValueError instead of silent empty dict
     with pytest.raises(ValueError, match="SHY.US lacks EOD bar"):
         compute_us_macro_targets(date(2026, 11, 13), {}, [])
+
+
+# ---------------------------------------------------------------------------
+# 19–20. Week-2+ HK Rotation Same-Session T+2 Funding & CLI Plan Re-Run Idempotency
+# ---------------------------------------------------------------------------
+def test_week2_hk_rotation_phase_a_sehk_t2_sell_funds_phase_b_buys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rot_plan = _make_minimal_plan(
+        market="HK",
+        targets=[
+            PlanTarget(
+                symbol="0939.HK",
+                ibkr_symbol="939",
+                market="HK",
+                exchange="SEHK",
+                currency="HKD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.15000000"),
+                sleeve_contributions={"hk_southbound_bluechip_v1": "0.15000000"},
+                ref_close=Decimal("10.50"),
+                lot_size=1000,
+                defensive_fallback="3053.HK",
+                is_defensive_fallback=False,
+            ),
+            PlanTarget(
+                symbol="3988.HK",
+                ibkr_symbol="3988",
+                market="HK",
+                exchange="SEHK",
+                currency="HKD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.15000000"),
+                sleeve_contributions={"hk_southbound_bluechip_v1": "0.15000000"},
+                ref_close=Decimal("6.28"),
+                lot_size=1000,
+                defensive_fallback="3053.HK",
+                is_defensive_fallback=False,
+            ),
+        ],
+    )
+    hk_quotes = {
+        "3053.HK": Quote("3053.HK", bid=1195.55, ask=1195.65, last=1195.60, prev_close=1195.60),
+        "0939.HK": Quote("0939.HK", bid=10.49, ask=10.51, last=10.50, prev_close=10.50),
+        "3988.HK": Quote("3988.HK", bid=6.27, ask=6.29, last=6.28, prev_close=6.28),
+    }
+
+    # Sub-case 1: Dry-run mode with 1,950 sh 3053.HK (~HK$2.33M) + HK$150 settled cash
+    mock_dry = MockBrokerAdapter(
+        positions={"3053.HK": PositionSnap("3053.HK", 1950, 1190.0, 1195.60, "HKD")},
+        cash={
+            "USD": CashSnap("USD", 700_000.0, 700_000.0, 700_000.0),
+            "HKD": CashSnap("HKD", 150.0, 150.0, 150.0),
+        },
+        quotes=hk_quotes,
+    )
+    rep_dry = execute_market_rebalance(
+        rot_plan,
+        mock_dry,
+        market="HK",
+        dry_run=True,
+        config=ExecutionPolicyConfig(poll_interval_sec=0.0),
+    )
+    assert rep_dry.spendable_cash_before_buys > 2_300_000.0
+    assert {o.symbol for o in rep_dry.capped_phase_b_buys} == {"0939.HK", "3988.HK"}
+
+    # Sub-case 2: Live IbAsyncBrokerAdapter on a USD-base IBKR account (AvailableFunds emitted
+    # ONLY for USD; SettledCash(HKD) stays 150.0 even after 3053.HK sells on SEHK T+2!)
+    @dataclass
+    class FakeStock:
+        symbol: str
+        exchange: str
+        currency: str
+
+    @dataclass
+    class FakeLimitOrder:
+        action: str
+        totalQuantity: int
+        lmtPrice: float
+        tif: str = "DAY"
+        orderRef: str = ""
+        transmit: bool = True
+        account: str = ""
+        algoStrategy: str = ""
+        algoParams: list[Any] = field(default_factory=list)
+        orderId: int = 1
+
+    class FakeUsdBaseIB:
+        def __init__(self) -> None:
+            self._oid = 500
+            self.placed: list[tuple[Any, Any]] = []
+
+        def connect(self, **_: Any) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            return None
+
+        def sleep(self, _: float) -> None:
+            return None
+
+        def qualifyContracts(self, *contracts: Any) -> list[Any]:
+            return list(contracts)
+
+        def portfolio(self, *_: Any) -> list[Any]:
+            return [
+                types.SimpleNamespace(
+                    contract=FakeStock("3053", "SEHK", "HKD"),
+                    position=1950.0,
+                    averageCost=1190.0,
+                    marketPrice=1195.60,
+                ),
+                types.SimpleNamespace(
+                    contract=FakeStock("SHY", "SMART", "USD"),
+                    position=8000.0,
+                    averageCost=81.0,
+                    marketPrice=81.17,
+                ),
+            ]
+
+        def accountValues(self, *_: Any) -> list[Any]:
+            # USD-base account: AvailableFunds emitted ONLY in USD; SettledCash(HKD) stays 150.0!
+            return [
+                types.SimpleNamespace(tag="CashBalance", value="50000.00", currency="USD"),
+                types.SimpleNamespace(tag="SettledCash", value="50000.00", currency="USD"),
+                types.SimpleNamespace(tag="AvailableFunds", value="950000.00", currency="USD"),
+                types.SimpleNamespace(tag="CashBalance", value="150.00", currency="HKD"),
+                types.SimpleNamespace(tag="SettledCash", value="150.00", currency="HKD"),
+            ]
+
+        def reqOpenOrders(self) -> None:
+            return None
+
+        def openTrades(self) -> list[Any]:
+            return []
+
+        def reqTickers(self, *contracts: Any) -> list[Any]:
+            out = []
+            for c in contracts:
+                if getattr(c, "pair", "") == "USDHKD":
+                    out.append(types.SimpleNamespace(bid=7.80, ask=7.80, close=7.80, last=7.80))
+                elif c.symbol == "3053":
+                    out.append(
+                        types.SimpleNamespace(
+                            bid=1195.55, ask=1195.65, close=1195.60, last=1195.60
+                        )
+                    )
+                elif c.symbol == "939":
+                    out.append(types.SimpleNamespace(bid=10.49, ask=10.51, close=10.50, last=10.50))
+                else:
+                    out.append(types.SimpleNamespace(bid=6.27, ask=6.29, close=6.28, last=6.28))
+            return out
+
+        def placeOrder(self, contract: Any, order: Any) -> Any:
+            self._oid += 1
+            order.orderId = self._oid
+            self.placed.append((contract, order))
+            return types.SimpleNamespace(
+                contract=contract,
+                order=order,
+                orderStatus=types.SimpleNamespace(
+                    status="Filled",
+                    filled=float(order.totalQuantity),
+                    remaining=0.0,
+                    avgFillPrice=float(order.lmtPrice),
+                ),
+            )
+
+    fake_mod = types.ModuleType("ib_async")
+    fake_mod.Stock = FakeStock  # type: ignore[attr-defined]
+    fake_mod.Forex = lambda pair: types.SimpleNamespace(pair=pair)  # type: ignore[attr-defined]
+    fake_mod.TagValue = lambda t, v: (t, v)  # type: ignore[attr-defined]
+    fake_mod.LimitOrder = FakeLimitOrder  # type: ignore[attr-defined]
+    fake_mod.IB = FakeUsdBaseIB  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ib_async", fake_mod)
+
+    with IbAsyncBrokerAdapter() as live_adapter:
+        rep_live = execute_market_rebalance(
+            rot_plan,
+            live_adapter,
+            market="HK",
+            dry_run=False,
+            config=ExecutionPolicyConfig(poll_interval_sec=0.0),
+        )
+    assert len(rep_live.phase_a_fills) == 1 and rep_live.phase_a_fills[0].symbol == "3053.HK"
+    assert rep_live.spendable_cash_before_buys > 2_300_000.0
+    assert {f.symbol for f in rep_live.phase_b_fills} == {"0939.HK", "3988.HK"}
+    assert all(f.status == "FILLED" for f in rep_live.phase_b_fills)
+
+    # Sub-case 3: Combined account with HK$1,000,000 unsettled FX + 500 sh 3053.HK (~HK$597,800):
+    # Phase B must spend ONLY (150 settled + ~597,000 SEHK sale) and leave HK$1,000,000 unsettled FX untouched!
+    mock_combined = MockBrokerAdapter(
+        positions={"3053.HK": PositionSnap("3053.HK", 500, 1190.0, 1195.60, "HKD")},
+        cash={
+            "USD": CashSnap("USD", 700_000.0, 700_000.0, 700_000.0),
+            "HKD": CashSnap("HKD", 1_000_150.0, 150.0, 1_000_150.0),
+        },
+        quotes=hk_quotes,
+    )
+    rep_comb = execute_market_rebalance(
+        rot_plan,
+        mock_combined,
+        market="HK",
+        dry_run=False,
+        config=ExecutionPolicyConfig(poll_interval_sec=0.0),
+    )
+    assert 590_000.0 < rep_comb.spendable_cash_before_buys < 600_000.0
+    assert len(rep_comb.phase_b_fills) > 0
+    assert mock_combined.cash["HKD"].total_cash >= 1_000_000.0
+
+
+def test_cli_plan_rerun_selects_strictly_older_previous_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rc_prev = cli_main(
+        [
+            "plan",
+            "--asof",
+            "2026-11-06",
+            "--from-cache",
+            "--us-cache-dir",
+            str(US_CACHE_DIR),
+            "--hk-cache-dir",
+            str(HK_CACHE_DIR),
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc_prev == 0
+    plan_06 = load_weekly_plan(tmp_path / "plan_20261106.json")
+
+    class FakeHoldingsIB:
+        def connect(self, **_: Any) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            return None
+
+        def qualifyContracts(self, *contracts: Any) -> list[Any]:
+            return list(contracts)
+
+        def portfolio(self, *_: Any) -> list[Any]:
+            return [
+                types.SimpleNamespace(
+                    contract=types.SimpleNamespace(symbol="3", currency="HKD"),
+                    position=10_000.0,
+                    averageCost=7.30,
+                    marketPrice=7.39,
+                ),
+                types.SimpleNamespace(
+                    contract=types.SimpleNamespace(symbol="SHY", currency="USD"),
+                    position=5_000.0,
+                    averageCost=81.0,
+                    marketPrice=81.17,
+                ),
+            ]
+
+        def accountValues(self, *_: Any) -> list[Any]:
+            return [
+                types.SimpleNamespace(tag="CashBalance", value="500000.0", currency="USD"),
+                types.SimpleNamespace(tag="SettledCash", value="500000.0", currency="USD"),
+                types.SimpleNamespace(tag="CashBalance", value="100000.0", currency="HKD"),
+                types.SimpleNamespace(tag="SettledCash", value="100000.0", currency="HKD"),
+            ]
+
+        def reqTickers(self, *contracts: Any) -> list[Any]:
+            out = []
+            for c in contracts:
+                if getattr(c, "pair", "") == "USDHKD":
+                    out.append(types.SimpleNamespace(bid=7.80, ask=7.80, close=7.80, last=7.80))
+                elif getattr(c, "symbol", "") == "3":
+                    out.append(types.SimpleNamespace(bid=7.38, ask=7.40, close=7.39, last=7.39))
+                else:
+                    out.append(types.SimpleNamespace(bid=81.16, ask=81.18, close=81.17, last=81.17))
+            return out
+
+    fake_mod = types.ModuleType("ib_async")
+    fake_mod.Stock = lambda symbol, exchange, currency: types.SimpleNamespace(  # type: ignore[attr-defined]
+        symbol=symbol, exchange=exchange, currency=currency
+    )
+    fake_mod.Forex = lambda pair: types.SimpleNamespace(pair=pair)  # type: ignore[attr-defined]
+    fake_mod.IB = FakeHoldingsIB  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ib_async", fake_mod)
+
+    args_13 = [
+        "plan",
+        "--asof",
+        "2026-11-13",
+        "--from-cache",
+        "--sync-ibkr-holdings",
+        "--us-cache-dir",
+        str(US_CACHE_DIR),
+        "--hk-cache-dir",
+        str(HK_CACHE_DIR),
+        "--out-dir",
+        str(tmp_path),
+    ]
+    assert cli_main(args_13) == 0
+    first_13 = load_weekly_plan(tmp_path / "plan_20261113.json")
+
+    # Even after plan_20261113.json exists in tmp_path, _find_previous_plan_before(2026-11-13)
+    # MUST return plan_20261106 (strictly older), so re-running `plan` is 100% target-idempotent!
+    resolved_prev = _find_previous_plan_before(tmp_path, date(2026, 11, 13))
+    assert resolved_prev is not None and resolved_prev.asof_date == plan_06.asof_date
+
+    assert cli_main(args_13) == 0
+    second_13 = load_weekly_plan(tmp_path / "plan_20261113.json")
+    assert [t.to_dict() for t in second_13.targets] == [t.to_dict() for t in first_13.targets]
+    assert second_13.sleeve_diagnostics == first_13.sleeve_diagnostics

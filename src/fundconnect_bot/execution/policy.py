@@ -927,6 +927,30 @@ def _unit_cost_with_fee(spec: OrderSpec, config: ExecutionPolicyConfig) -> float
     return worst_px * (1.0 + fee_bps / 10_000.0)
 
 
+def _realized_sell_net_proceeds(
+    sells: Sequence[OrderSpec],
+    fills: Sequence[FillReport],
+    config: ExecutionPolicyConfig,
+) -> float:
+    """Compute conservative fee-adjusted net proceeds from executed same-session Phase A sells."""
+    spec_by_intent = {s.intent_id: s for s in sells}
+    net = 0.0
+    for fr in fills:
+        if fr.filled_qty <= 0 or fr.avg_fill_price <= 0.0:
+            continue
+        spec = spec_by_intent.get(fr.intent_id)
+        if spec is None or spec.side != "SELL":
+            continue
+        if spec.currency == "USD":
+            fee_bps = config.us_fee_buffer_bps
+        elif spec.asset_class == "etf":
+            fee_bps = config.hk_etf_fee_buffer_bps
+        else:
+            fee_bps = config.hk_stock_fee_buffer_bps
+        net += fr.filled_qty * fr.avg_fill_price * (1.0 - fee_bps / 10_000.0)
+    return net
+
+
 def compute_spendable_cash(
     cash_snap: CashSnap,
     *,
@@ -1112,6 +1136,10 @@ def execute_market_rebalance(
                 state_path,
             )
 
+    # Refresh cash snapshot after Phase A sells before optional FX & Phase B cash cap
+    ccy: CurrencyCode = "HKD" if market == "HK" else "USD"
+    after_sells_c = broker.get_cash().get(ccy, CashSnap(ccy, 0.0, 0.0, 0.0))
+
     # Optional FX conversion during US bootstrap
     fx_report: FxConversionReport | None = None
     if market == "US" and bootstrap_fx_usd > 0.0:
@@ -1124,30 +1152,52 @@ def execute_market_rebalance(
                 f"pass --allow-fx-convert (after T+1 US settlement for zero margin interest) to convert USD.HKD."
             )
 
-    # Refresh cash snapshot after Phase A sells & FX before sizing Phase B cash cap
-    post_sell_cash = broker.get_cash()
-    ccy: CurrencyCode = "HKD" if market == "HK" else "USD"
     reserve_usd = bootstrap_fx_usd if (market == "US" and not allow_fx_convert) else 0.0
 
-    if dry_run and batch.phase_a_sells:
-        # In dry-run mode, simulate Phase A sell proceeds so Phase B preview reflects sell funding
+    if dry_run:
+        # Simulate same-session Phase A sell proceeds (US T+1 -> US T+1, SEHK T+2 -> SEHK T+2)
         est_proceeds = sum(
             s.quantity * float(s.limit_price) * (0.99985 if ccy == "USD" else 0.9988)
             for s in batch.phase_a_sells
             if s.style != "PROTECTIVE_FLOOR_LIMIT"
         )
-        cur_c = post_sell_cash[ccy]
+        fx_dry_deduct = (
+            fx_report.sell_amount if (ccy == "USD" and fx_report is not None) else 0.0
+        )
         sim_cash = CashSnap(
             currency=ccy,
-            total_cash=cur_c.total_cash + est_proceeds,
-            settled_cash=cur_c.settled_cash + (est_proceeds if ccy == "USD" else 0.0),
-            available_funds=cur_c.available_funds + est_proceeds,
+            total_cash=max(0.0, after_sells_c.total_cash + est_proceeds - fx_dry_deduct),
+            settled_cash=max(0.0, after_sells_c.settled_cash + est_proceeds - fx_dry_deduct),
+            available_funds=max(0.0, after_sells_c.available_funds + est_proceeds - fx_dry_deduct),
         )
         spendable = compute_spendable_cash(sim_cash, reserve_amount=reserve_usd, config=config)
     else:
-        spendable = compute_spendable_cash(
-            post_sell_cash[ccy], reserve_amount=reserve_usd, config=config
+        # Credit realized same-session Phase A sells (same settlement cycle as Phase B buys:
+        # US T+1 == T+1, SEHK CCASS T+2 == T+2) while keeping pre-existing unsettled FX isolated!
+        pre_c = cash.get(ccy, CashSnap(ccy, 0.0, 0.0, 0.0))
+        realized_sell_net = _realized_sell_net_proceeds(batch.phase_a_sells, phase_a_fills, config)
+        eff_total = max(after_sells_c.total_cash, pre_c.total_cash + realized_sell_net)
+        eff_settled = min(
+            eff_total,
+            max(after_sells_c.settled_cash, pre_c.settled_cash + realized_sell_net),
         )
+        eff_avail = max(after_sells_c.available_funds, pre_c.available_funds + realized_sell_net)
+        if ccy == "USD" and fx_report is not None and fx_report.status != "DRY_RUN":
+            post_fx_c = broker.get_cash().get("USD", after_sells_c)
+            eff_total = max(0.0, min(post_fx_c.total_cash, eff_total - fx_report.sell_amount))
+            eff_settled = max(
+                0.0, min(eff_total, post_fx_c.settled_cash, eff_settled - fx_report.sell_amount)
+            )
+            eff_avail = max(
+                0.0, min(post_fx_c.available_funds, eff_avail - fx_report.sell_amount)
+            )
+        eff_cash = CashSnap(
+            currency=ccy,
+            total_cash=eff_total,
+            settled_cash=eff_settled,
+            available_funds=eff_avail,
+        )
+        spendable = compute_spendable_cash(eff_cash, reserve_amount=reserve_usd, config=config)
 
     capped_buys, cap_warnings = apply_cash_cap_to_buys(
         batch.phase_b_buys, spendable_cash=spendable, config=config
