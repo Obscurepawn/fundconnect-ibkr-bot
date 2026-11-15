@@ -133,12 +133,40 @@ When querying `ib.accountValues()`, TWS reports distinct trade-date, settlement-
 
 ---
 
-## 5. Summary Checklist for `fundconnect-ibkr-bot` Formal Modeling & E2E Testing
+## 5. Market Data Types (`reqMarketDataType(1..4)`), Delayed Quotes, and Server-Side Price Improvement
+
+`EClient.reqMarketDataType(marketDataType)` (`ib.reqMarketDataType(1..4)`) configures the session-level fallback policy for subsequent `reqMktData` / `reqTickers` snapshot requests:
+
+| Type ID | IBKR Name | Behavior With Paid Live Subscription | Behavior Without Paid Equity Subscription |
+| :---: | :--- | :--- | :--- |
+| `1` | **Live** | Streams real-time Level-1 `bid`, `ask`, `last`, `close` (`marketDataType = 1`). | Emits **`Error 10089`** (*"Requested market data requires additional subscription for API"*) and returns `-1.0` / `NaN` for `STK` `bid`, `ask`, `last` (`IDEALPRO` `Forex('USDHKD')` remains free real-time). |
+| `2` | **Frozen** | Returns real-time quotes during trading hours and the last recorded quote when closed. | Emits `Error 10089` on unsubscribed equities. |
+| `3` | **Delayed** | **Automatically upgrades to Type `1` Live** whenever the account holds live permissions. | Streams free 15-minute delayed ticks (`66=delayedBid`, `67=delayedAsk`, `68=delayedLast`, `75=delayedClose`, `marketDataType = 3`) while `bid` / `ask` remain `-1.0` / `NaN`. |
+| `4` | **Delayed-Frozen** | **Automatically upgrades to Type `1` Live** (or Type `2` Frozen after close) when subscribed. | Streams free 15-minute delayed quotes during continuous trading and retains the last delayed snapshot outside regular hours (`marketDataType = 4`). |
+
+### 5.1 Safe Delayed-Quote Resolution & Halt Preservation
+
+When `reqMarketDataType(4)` is active on an unsubscribed account, `IbAsyncBrokerAdapter.get_quotes()` resolves `Ticker` fields in strict priority order:
+1. Live `(tk.bid, tk.ask)` if `bid > 0` and `ask >= bid` (`is_delayed = (tk.marketDataType in (3, 4))`).
+2. Delayed `(tk.delayedBid, tk.delayedAsk)` if `delayedBid > 0` and `delayedAsk >= delayedBid` (`is_delayed = True`).
+3. Traded `(tk.last or tk.delayedLast)` if strictly positive: synthesizes a tick-aligned BBO around the traded print (`is_delayed = True`) for venues that omit delayed BBO on snapshot tickers. **Never** falls back to `close` / `delayedClose`, ensuring halted or untraded instruments (`bid <= 0, ask <= 0, last <= 0`) still produce `Quote.is_valid == False` (`HALTED_OR_NO_QUOTE`).
+
+### 5.2 Server-Side Real-Time Matching & Price Improvement Under Delayed Client Quotes
+
+Crucially, **order routing and matching on IBKR's servers always execute against the real-time venue book**, regardless of whether the API client views Type-1 or Type-4 quotes:
+- On US `SMART`, `LimitOrder` with `algoStrategy='Adaptive'` (`ADAPTIVE_NORMAL` / `ADAPTIVE_PATIENT`) works inside the **real-time** NBBO spread on IBKR's server and treats `order.lmtPrice` strictly as a **worst-case protective ceiling** (`BUY`) or **floor** (`SELL`).
+- On `SEHK`, a marketable `LimitOrder` crosses the real-time HKEX central limit order book at the **best resting opposite quote(s) (Price Improvement)** up to `order.lmtPrice`.
+- Because a 15-minute delayed `quote.ask` (`BUY`) or `quote.bid` (`SELL`) can lag real-time drift by `15..45 bps`, clamping a `BUY` limit down to stale `quote.ask` would leave the order unmarketable even across walk steps. When `quote.is_delayed` is `True`, `ExecutionPolicyConfig` widens the protective ceiling band (`25 -> 40 -> 55 -> 60 bps` around `arrival_mid`) without clamping down to stale `quote.ask`/`quote.bid`, while reserving the full `60 bps` ceiling in `_unit_cost_with_fee` so `BuyBudgetWithinCap` and `ZeroMarginLoanSettledCash` remain invariant. Scheduling timers at **`09:48` local exchange time** (`18` minutes post-open) guarantees free 15-minute delayed snapshots reflect `09:33` continuous post-auction trading rather than pre-open frozen closes.
+
+---
+
+## 6. Summary Checklist for `fundconnect-ibkr-bot` Formal Modeling & E2E Testing
 
 1. **Terminal-State Guard on Walk-Limit Modify**: Before mutating `trade.order.lmtPrice` or calling `ib.placeOrder` in `modify_order_limit`, check whether `trade.orderStatus.status` has already entered `DoneStates` (`Filled`, `Cancelled`, `ApiCancelled`, `Inactive`) during intervening `get_quotes()` / `ib.sleep()` event-loop turns, and handle server-side `Error 104` gracefully without corrupting `FillReport` or crashing mid-batch.
 2. **Cross-`clientId` Open Order Visibility**: Use `reqAllOpenOrders()` rather than `reqOpenOrders()` so open orders submitted by prior sessions with different `clientId`s or manual TWS GUI intervention are visible to `get_open_orders()`.
 3. **Rejection & Partial-Fill Persistence Semantics**: Distinguish terminal rejected/cancelled orders (`Inactive` / `Error 110` / `Error 201`, `filled == 0`) from active/completed orders when recording `ExecutionState.completed_intents` and FX conversion status (`convert_usd_to_hkd` must check fill completion rather than treating `Inactive`/`Cancelled` or duplicate `--allow-fx-convert` runs as newly settled conversions).
 4. **Physical FX Conversion (`FXCONV`) & Settlement Accounting**: Route `USD.HKD` conversion orders via `exchange='FXCONV'` (while keeping `IDEALPRO` for `USD.HKD` quote discovery) so conversions update `CashBalance` / `T+2` `SettledCash` without spawning Virtual FX Positions in TWS.
+5. **Delayed-Frozen Market Data (`reqMarketDataType(4)`) & Protective Ceilings**: Default socket sessions to `marketDataType = 4` so unsubscribed accounts receive free 15m delayed quotes without `Error 10089` while subscribed accounts automatically retain Type-1 live quotes, and reserve `delayed_max_slippage_bps` (`60 bps`) on delayed buy caps.
 
 ---
 
@@ -146,6 +174,7 @@ When querying `ib.accountValues()`, TWS reports distinct trade-date, settlement-
 
 1. Interactive Brokers TWS API Documentation — *Order Submission & Possible Order States (`PendingSubmit`, `PreSubmitted`, `Submitted`, `PendingCancel`, `Cancelled`, `ApiCancelled`, `Inactive`)*: `https://interactivebrokers.github.io/tws-api/order_submission.html`
 2. Interactive Brokers TWS API Documentation — *Modifying Orders & Open Orders (`reqOpenOrders`, `reqAllOpenOrders`, `clientId = 0`)*: `https://interactivebrokers.github.io/tws-api/open_orders.html` and `https://interactivebrokers.github.io/tws-api/modifying_orders.html`
-3. Interactive Brokers TWS API Documentation — *Message Codes (`Error 104`, `Error 110`, `Error 200`, `Error 201`, `Warning 399`, `Error 10148`)*: `https://interactivebrokers.github.io/tws-api/message_codes.html`
+3. Interactive Brokers TWS API Documentation — *Message Codes (`Error 104`, `Error 110`, `Error 200`, `Error 201`, `Warning 399`, `Error 10089`, `Error 10148`)*: `https://interactivebrokers.github.io/tws-api/message_codes.html`
 4. Interactive Brokers Campus / TWS Users' Guide — *FXCONV vs. IDEALPRO Virtual FX Positions & Account Summary Tags (`CashBalance`, `SettledCash`, `AvailableFunds`)*: `https://www.ibkrguides.com/tws/usersguidebook/realtimeactivitymonitoring/fxportfolio.htm` and `https://interactivebrokers.github.io/tws-api/account_summary.html`
-5. `ib-api-reloaded/ib_async` Documentation — *`IB.placeOrder`, `IB.openTrades`, `IB.reqAllOpenOrders`, `OrderStatus.ActiveStates` / `OrderStatus.DoneStates`, and `Forex` Contracts*: `https://ib-api-reloaded.github.io/ib_async/api.html`
+5. Interactive Brokers TWS API Documentation — *Market Data Types (`reqMarketDataType(1..4)`, Delayed Tick Types `66..76`)*: `https://interactivebrokers.github.io/tws-api/market_data_type.html`
+6. `ib-api-reloaded/ib_async` Documentation — *`IB.placeOrder`, `IB.openTrades`, `IB.reqAllOpenOrders`, `IB.reqMarketDataType`, `OrderStatus.ActiveStates` / `OrderStatus.DoneStates`, and `Forex` Contracts*: `https://ib-api-reloaded.github.io/ib_async/api.html`

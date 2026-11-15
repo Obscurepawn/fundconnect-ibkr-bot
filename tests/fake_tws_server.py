@@ -199,6 +199,11 @@ class Ticker:
     close: float
     bidSize: float = 100.0
     askSize: float = 100.0
+    delayedBid: float = -1.0
+    delayedAsk: float = -1.0
+    delayedLast: float = -1.0
+    delayedClose: float = -1.0
+    marketDataType: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -340,12 +345,15 @@ class FakeTwsServer:
         usdhkd_ask: float = 7.8005,
         fill_mode: FillMode = "CROSS_SPREAD",
         apply_fees: bool = True,
+        has_live_equity_subscription: bool = True,
+        delayed_quotes: Mapping[str, tuple[float, float, float, float]] | None = None,
     ) -> None:
         self.account_id = account_id
         self.base_currency: CurrencyCode = base_currency
         self.account_type: AccountType = account_type
         self.fill_mode: FillMode = fill_mode
         self.apply_fees = apply_fees
+        self.has_live_equity_subscription: bool = has_live_equity_subscription
 
         self.current_day: int = 0
         self.clock_sec: float = 0.0
@@ -390,6 +398,10 @@ class FakeTwsServer:
         self.virtual_fx_avg_rate: float = 0.0
 
         self.quotes: dict[str, ServerQuote] = {}
+        self.delayed_quotes: dict[str, ServerQuote] = {
+            sym: ServerQuote(bid=db, ask=da, last=dl, close=dc)
+            for sym, (db, da, dl, dc) in (delayed_quotes or {}).items()
+        }
         self.tick_overrides: dict[str, Decimal] = {}
         self.scripts: dict[str, OrderScript] = {}
         self.sleep_hooks: list[Callable[[FakeTwsServer, float], None]] = []
@@ -480,6 +492,21 @@ class FakeTwsServer:
         )
         if canon_symbol in self.holdings and eff_last > 0:
             self.holdings[canon_symbol].market_price = eff_last
+
+    def set_delayed_quote(
+        self,
+        canon_symbol: str,
+        *,
+        bid: float,
+        ask: float,
+        last: float | None = None,
+        close: float | None = None,
+    ) -> None:
+        eff_last = last if last is not None else (0.5 * (bid + ask) if (bid > 0 and ask > 0) else -1.0)
+        eff_close = close if close is not None else eff_last
+        self.delayed_quotes[canon_symbol] = ServerQuote(
+            bid=bid, ask=ask, last=eff_last, close=eff_close
+        )
 
     def set_order_script(self, canon_symbol: str, script: OrderScript) -> None:
         self.scripts[canon_symbol] = script
@@ -636,7 +663,11 @@ class FakeTwsServer:
                 )
                 return None
             canon = from_ibkr_position_symbol(sym, "HKD")
-            if canon not in self.quotes and canon not in self.holdings:
+            if (
+                canon not in self.quotes
+                and canon not in self.delayed_quotes
+                and canon not in self.holdings
+            ):
                 self._emit_error(
                     req_id,
                     200,
@@ -648,7 +679,11 @@ class FakeTwsServer:
 
         if ccy == "USD":
             canon = from_ibkr_position_symbol(sym, "USD")
-            if canon not in self.quotes and canon not in self.holdings:
+            if (
+                canon not in self.quotes
+                and canon not in self.delayed_quotes
+                and canon not in self.holdings
+            ):
                 self._emit_error(
                     req_id,
                     200,
@@ -1125,6 +1160,7 @@ class FakeIB:
         self._server = server
         self.clientId: int = 0
         self.connected: bool = False
+        self.market_data_type: int = 1
         # Keyed by (client_id, order_id, perm_id) just like ib_async Wrapper.trades
         self._trades: dict[tuple[int, int, int], Trade] = {}
         self._trades_by_order_id: dict[int, Trade] = {}
@@ -1164,6 +1200,15 @@ class FakeIB:
 
     def isConnected(self) -> bool:
         return self.connected
+
+    def reqMarketDataType(self, marketDataType: int) -> None:
+        self._require_connected()
+        if marketDataType not in (1, 2, 3, 4):
+            self._server._emit_error(
+                0, 321, f"Error validating request: invalid marketDataType {marketDataType}", self.clientId
+            )
+            return
+        self.market_data_type = int(marketDataType)
 
     def _on_server_order_update(self, rec: ServerOrderRecord) -> Trade:
         key = (rec.client_id, rec.order_id, rec.perm_id)
@@ -1296,11 +1341,74 @@ class FakeIB:
                             self._server._sync_record_to_clients(rec)
 
             q = self._server.quotes.get(canon or "")
-            if q is None:
-                out.append(Ticker(contract=c, bid=0.0, ask=0.0, last=0.0, close=0.0))
+            if self._server.has_live_equity_subscription:
+                if q is None:
+                    out.append(
+                        Ticker(contract=c, bid=0.0, ask=0.0, last=0.0, close=0.0, marketDataType=1)
+                    )
+                else:
+                    out.append(
+                        Ticker(
+                            contract=c,
+                            bid=q.bid,
+                            ask=q.ask,
+                            last=q.last,
+                            close=q.close,
+                            marketDataType=1,
+                        )
+                    )
+                continue
+
+            # Unsubscribed account (`has_live_equity_subscription == False`):
+            if self.market_data_type in (1, 2):
+                self._server._emit_error(
+                    0,
+                    10089,
+                    f"Requested market data requires additional subscription for API. ({canon or getattr(c, 'symbol', '')})",
+                    self.clientId,
+                )
+                out.append(
+                    Ticker(
+                        contract=c,
+                        bid=-1.0,
+                        ask=-1.0,
+                        last=-1.0,
+                        close=q.close if q is not None else -1.0,
+                        marketDataType=self.market_data_type,
+                    )
+                )
+                continue
+
+            dq = self._server.delayed_quotes.get(canon or "") or q
+            if dq is None:
+                out.append(
+                    Ticker(
+                        contract=c,
+                        bid=-1.0,
+                        ask=-1.0,
+                        last=-1.0,
+                        close=-1.0,
+                        delayedBid=-1.0,
+                        delayedAsk=-1.0,
+                        delayedLast=-1.0,
+                        delayedClose=-1.0,
+                        marketDataType=self.market_data_type,
+                    )
+                )
             else:
                 out.append(
-                    Ticker(contract=c, bid=q.bid, ask=q.ask, last=q.last, close=q.close)
+                    Ticker(
+                        contract=c,
+                        bid=-1.0,
+                        ask=-1.0,
+                        last=-1.0,
+                        close=-1.0,
+                        delayedBid=dq.bid,
+                        delayedAsk=dq.ask,
+                        delayedLast=dq.last,
+                        delayedClose=dq.close,
+                        marketDataType=self.market_data_type,
+                    )
                 )
         return out
 

@@ -25,3 +25,10 @@
 - **Before / after TLC summary**:
   - Pre-fix (`L1_TwsWalkLimitAndRaces.tla`): violated `NoModifyOnTerminalOrder` (`47` distinct states, depth `7`) and `FillAccountingExact` (`35` & `67` distinct states, depths `6` & `9`).
   - Post-fix (`L1_TwsWalkLimitAndRaces_v2.tla`): **PASS** (`0` violations across all 6 invariants including `CoarseTickWalkReachesNextTick`; `660` distinct / `1,250` generated states in `_v2.cfg`, `708` distinct / `1,352` generated states in `_v2_scale.cfg`, `20/20` actions covered with `0` dead actions across all 7 cfgs).
+
+## Delayed-Quote Mode Sync (`2026-11-16` — `L1_TwsWalkLimitAndRaces_v2`)
+- **Modeled extension**: Extended `L1_TwsWalkLimitAndRaces_v2.tla` with `delayed_quote \in BOOLEAN` (`OrderSpec.delayed_quote`, `src/fundconnect_bot/execution/broker.py:109`, `src/fundconnect_bot/execution/policy.py:589`) to check both live (`8 / 6 / 25 bps`) and free 15m delayed (`25 / 15 / 60 bps`, `config.py:243-245`, `policy.py:221-230, 267-287`) protective walk bands simultaneously.
+- **Verified properties**:
+  - `LimitNeverExceedsSlippageCeiling`: every transmitted limit stays tick-aligned and within `+/- 25 bps` (`delayed_quote=FALSE`) or `+/- 60 bps` (`delayed_quote=TRUE`) of `arrival_mid`.
+  - `CoarseTickWalkReachesNextTick`: even when 15m delayed quotes remain stale near `arrival_mid` (`+/- 5 bps`), `min(max(ask, step_cap), hard_cap)` / `max(min(bid, step_flr), hard_flr)` walks cleanly across both fine (`1 bps`) and coarse (`16 bps`) ticks to `RoundToTick(HardSlippageBound(side, delayed_quote), side, tick_step)` without clamping to stale quotes.
+- **TLC & coverage**: `1,326` distinct / `2,464` generated states in `_v2.cfg`, `1,422` distinct / `2,658` generated states in `_v2_scale.cfg`, `20/20` actions covered across all 7 cfgs (`0` violations, `0` anchor drift).

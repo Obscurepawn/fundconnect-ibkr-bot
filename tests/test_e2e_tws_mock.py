@@ -42,8 +42,12 @@ from fundconnect_bot.config import (
     ExecutionPolicyConfig,
     IbkrConnectionConfig,
 )
-from fundconnect_bot.execution.broker import IbAsyncBrokerAdapter
-from fundconnect_bot.execution.policy import ActionCode, execute_market_rebalance
+from fundconnect_bot.execution.broker import IbAsyncBrokerAdapter, OrderSpec
+from fundconnect_bot.execution.policy import (
+    ActionCode,
+    apply_cash_cap_to_buys,
+    execute_market_rebalance,
+)
 from fundconnect_bot.strategies.composite import (
     PlanTarget,
     WeeklyPlan,
@@ -1536,5 +1540,497 @@ def test_e2e_cash_capped_scaled_buy_preserves_remaining_target_and_fx_crash_chec
         )
     assert fx_rep2.fx_report is not None and fx_rep2.fx_report.status == "ALREADY_COMPLETED"
     assert s_fx_crash.cash_balance["HKD"] == pytest.approx(780_000.0)
+
+
+# ---------------------------------------------------------------------------
+# 5. Free 15m Delayed-Quote Mode (`reqMarketDataType(4)`), Price Improvement & Env Defaults
+# ---------------------------------------------------------------------------
+def test_e2e_unsubscribed_paper_delayed_quotes_monday_us_fx_hk_price_improvement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsubscribed Paper account (`has_live_equity_subscription=False`):
+    - `market_data_type=1` emits `Error 10089` on STK while `Forex('USDHKD')` stays live, halting equity orders safely.
+    - Default `market_data_type=4` executes Monday US + FX + T+2 HK rebalance when live quotes drifted +20..+38 bps
+      above 15m-delayed quotes, filling with real-time server-side Price Improvement and `SettledCash >= 0`.
+    """
+    plan = _make_plan(
+        market="US",
+        targets=[
+            PlanTarget(
+                symbol="SHY.US",
+                ibkr_symbol="SHY",
+                market="US",
+                exchange="SMART",
+                currency="USD",
+                asset_class="etf",
+                portfolio_weight=Decimal("0.30000000"),
+                sleeve_contributions={"us_macro_allweather_v1": "0.30000000"},
+                ref_close=Decimal("100.00"),
+                lot_size=1,
+                defensive_fallback="SHY.US",
+                is_defensive_fallback=True,
+            ),
+            PlanTarget(
+                symbol="AAPL.US",
+                ibkr_symbol="AAPL",
+                market="US",
+                exchange="SMART",
+                currency="USD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.15000000"),
+                sleeve_contributions={"us_sector_quality_mom_v1": "0.15000000"},
+                ref_close=Decimal("200.00"),
+                lot_size=1,
+                defensive_fallback="SHY.US",
+                is_defensive_fallback=False,
+            ),
+            PlanTarget(
+                symbol="MSFT.US",
+                ibkr_symbol="MSFT",
+                market="US",
+                exchange="SMART",
+                currency="USD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.15000000"),
+                sleeve_contributions={"us_sector_quality_mom_v1": "0.15000000"},
+                ref_close=Decimal("100.00"),
+                lot_size=1,
+                defensive_fallback="SHY.US",
+                is_defensive_fallback=False,
+            ),
+            PlanTarget(
+                symbol="COST.US",
+                ibkr_symbol="COST",
+                market="US",
+                exchange="SMART",
+                currency="USD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.05000000"),
+                sleeve_contributions={"us_sector_quality_mom_v1": "0.05000000"},
+                ref_close=Decimal("500.00"),
+                lot_size=1,
+                defensive_fallback="SHY.US",
+                is_defensive_fallback=False,
+            ),
+            PlanTarget(
+                symbol="3053.HK",
+                ibkr_symbol="3053",
+                market="HK",
+                exchange="SEHK",
+                currency="HKD",
+                asset_class="etf",
+                portfolio_weight=Decimal("0.15000000"),
+                sleeve_contributions={"hk_etf_southbound_rot_v1": "0.15000000"},
+                ref_close=Decimal("1200.00"),
+                lot_size=1,
+                defensive_fallback="3053.HK",
+                is_defensive_fallback=True,
+            ),
+            PlanTarget(
+                symbol="0002.HK",
+                ibkr_symbol="2",
+                market="HK",
+                exchange="SEHK",
+                currency="HKD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.08000000"),
+                sleeve_contributions={"hk_southbound_bluechip_v1": "0.08000000"},
+                ref_close=Decimal("80.00"),
+                lot_size=500,
+                defensive_fallback="3053.HK",
+                is_defensive_fallback=False,
+            ),
+        ],
+    )
+
+    sgov_shares = 9_946
+    sgov_px = 100.54
+    init_usd = 1_000_000.0 - (sgov_shares * sgov_px)
+
+    # 15m delayed quotes vs live server matching quotes (+20..+38 bps upward drift, +80 bps extreme drift on COST.US)
+    delayed_q = {
+        BOOTSTRAP_SOURCE_SYMBOL: (100.53, 100.55, 100.54, 100.54),
+        "SHY.US": (99.99, 100.01, 100.00, 100.00),
+        "AAPL.US": (199.95, 200.05, 200.00, 200.00),
+        "MSFT.US": (99.98, 100.02, 100.00, 100.00),
+        "COST.US": (499.90, 500.10, 500.00, 500.00),
+        "3053.HK": (1199.95, 1200.05, 1200.00, 1200.00),
+        "0002.HK": (79.95, 80.05, 80.00, 80.00),
+    }
+    server = FakeTwsServer(
+        base_currency="USD",
+        usd_cash=init_usd,
+        usd_settled_cash=init_usd,
+        hkd_cash=0.0,
+        hkd_settled_cash=0.0,
+        usdhkd_bid=7.8000,
+        usdhkd_ask=7.8004,
+        fill_mode="CROSS_SPREAD",
+        has_live_equity_subscription=False,
+        delayed_quotes=delayed_q,
+    )
+    server.set_position(BOOTSTRAP_SOURCE_SYMBOL, sgov_shares, sgov_px, sgov_px)
+    # Live matching book on IBKR server:
+    server.set_quote(BOOTSTRAP_SOURCE_SYMBOL, bid=100.36, ask=100.38, close=100.54)  # -18 bps sell drift
+    server.set_quote("SHY.US", bid=100.18, ask=100.20, close=100.00)   # +20 bps live drift
+    server.set_quote("AAPL.US", bid=200.38, ask=200.40, close=200.00)  # +20 bps live drift (step 0 -> 200.50, fills @ 200.40!)
+    server.set_quote("MSFT.US", bid=100.33, ask=100.35, close=100.00)  # +35 bps live drift (step 0=100.25 -> step 1=100.40, fills @ 100.35!)
+    server.set_quote("COST.US", bid=503.90, ask=504.00, close=500.00)  # +80 bps live drift (> +60 bps hard cap 503.00 -> stays WORKING!)
+    server.set_quote("3053.HK", bid=1202.35, ask=1202.40, close=1200.00)  # +20 bps live drift (step 0=1203.00, fills @ 1202.40!)
+    server.set_quote("0002.HK", bid=80.20, ask=80.25, close=80.00)     # +31.25 bps live drift (step 0=80.20 -> step 1=80.30, fills @ 80.25!)
+    _install_fake_ib(monkeypatch, server)
+
+    cfg = ExecutionPolicyConfig(poll_interval_sec=0.05)
+
+    # Part A: Type-1 Live request on unsubscribed account emits Error 10089 on STK, keeps FX live, and halts safely
+    with IbAsyncBrokerAdapter(IbkrConnectionConfig(market_data_type=1)) as live_only_adapter:
+        assert live_only_adapter.get_usdhkd_rate() == pytest.approx(7.8002)
+        rep_blocked = execute_market_rebalance(
+            plan,
+            live_only_adapter,
+            market="US",
+            dry_run=False,
+            config=cfg,
+        )
+    assert any(e.error_code == 10089 for e in server.errors)
+    assert all(d.action == ActionCode.HALTED_OR_NO_QUOTE for d in rep_blocked.batch.decisions)
+    assert len(server.orders) == 0
+    server.errors.clear()
+
+    # Part B: Default Type-4 (Delayed-Frozen) executes Monday US rebalance with real-time Price Improvement
+    with IbAsyncBrokerAdapter() as adapter:
+        us_rep = execute_market_rebalance(
+            plan,
+            adapter,
+            market="US",
+            dry_run=False,
+            bootstrap_fx_usd=250_000.0,
+            allow_fx_convert=False,
+            config=cfg,
+        )
+        assert any("[DELAYED_QUOTE_MODE]" in al for al in us_rep.alerts)
+        assert len(us_rep.phase_a_fills) == 1
+        sgov_fill = us_rep.phase_a_fills[0]
+        assert sgov_fill.status == "FILLED"
+        assert sgov_fill.reprice_count == 0
+        # Protective delayed sell floor was 100.29 (-25 bps), filled at live real-time bid 100.36!
+        assert sgov_fill.final_limit_price == Decimal("100.29")
+        assert sgov_fill.avg_fill_price == pytest.approx(100.36)
+
+        us_by_sym = {f.symbol: f for f in us_rep.phase_b_fills}
+        # AAPL.US (+20 bps drift): step-0 ceiling 200.50 (+25 bps), filled on step 0 at live 200.40 (< 200.50)!
+        assert us_by_sym["AAPL.US"].status == "FILLED"
+        assert us_by_sym["AAPL.US"].reprice_count == 0
+        assert us_by_sym["AAPL.US"].final_limit_price == Decimal("200.50")
+        assert us_by_sym["AAPL.US"].avg_fill_price == pytest.approx(200.40)
+
+        # MSFT.US (+35 bps drift): step-0 100.25 -> step-1 100.40 (+40 bps), filled on step 1 at live 100.35 (< 100.40)!
+        assert us_by_sym["MSFT.US"].status == "FILLED"
+        assert us_by_sym["MSFT.US"].reprice_count == 1
+        assert us_by_sym["MSFT.US"].final_limit_price == Decimal("100.40")
+        assert us_by_sym["MSFT.US"].avg_fill_price == pytest.approx(100.35)
+
+        # COST.US (+80 bps drift): walked 3 steps (501.25 -> 502.00 -> 502.75 -> 503.00) and stopped at +60 bps ceiling!
+        assert us_by_sym["COST.US"].status == "WORKING"
+        assert us_by_sym["COST.US"].reprice_count == 3
+        assert us_by_sym["COST.US"].final_limit_price == Decimal("503.00")
+        assert server.settled_cash("USD") >= 0.0
+
+        # Cancel resting COST.US order at EOD, advance 1 day (US T+1 settles), convert $250k USD -> HKD via FXCONV
+        cost_rec = next(r for r in server.orders if r.canon_symbol == "COST.US")
+        server.cancel_server_order(cost_rec.perm_id, status="Cancelled")
+        server.advance_settlement_days(1)
+        assert server.settled_cash("USD") > 260_000.0
+
+        fx_rep = adapter.convert_usd_to_hkd(250_000.0, dry_run=False)
+        assert fx_rep.status == "Filled"
+        assert server.settled_cash("USD") >= 0.0
+        assert server.settled_cash("HKD") == pytest.approx(0.0)
+
+        # Advance 2 days for T+2 FX settlement -> execute HK sleeve with SEHK Price Improvement
+        server.advance_settlement_days(2)
+        assert server.settled_cash("HKD") == pytest.approx(1_950_000.0)
+
+        hk_rep = execute_market_rebalance(
+            plan,
+            adapter,
+            market="HK",
+            dry_run=False,
+            config=cfg,
+        )
+        assert any("[DELAYED_QUOTE_MODE]" in al for al in hk_rep.alerts)
+        hk_by_sym = {f.symbol: f for f in hk_rep.phase_b_fills}
+        # 3053.HK (+20 bps drift): step-0 ceiling 1203.00 (+25 bps), filled at live SEHK ask 1202.40!
+        assert hk_by_sym["3053.HK"].status == "FILLED"
+        assert hk_by_sym["3053.HK"].reprice_count == 0
+        assert hk_by_sym["3053.HK"].final_limit_price == Decimal("1203.00")
+        assert hk_by_sym["3053.HK"].avg_fill_price == pytest.approx(1202.40)
+
+        # 0002.HK (+31.25 bps drift): step-0 80.20 (< 80.25) -> step-1 80.30 (+40 bps = 80.32 -> HKEX 0.05 floor 80.30),
+        # filled at live SEHK ask 80.25 (< 80.30)!
+        assert hk_by_sym["0002.HK"].status == "FILLED"
+        assert hk_by_sym["0002.HK"].reprice_count == 1
+        assert hk_by_sym["0002.HK"].final_limit_price == Decimal("80.30")
+        assert hk_by_sym["0002.HK"].avg_fill_price == pytest.approx(80.25)
+
+        assert len(server.errors) == 0
+        for _ in range(2):
+            assert server.settled_cash("USD") >= 0.0
+            assert server.settled_cash("HKD") >= 0.0
+            server.advance_settlement_days(1)
+        assert server.settled_cash("USD") >= 0.0
+        assert server.settled_cash("HKD") >= 0.0
+
+
+def test_e2e_delayed_last_fallback_halted_guard_and_delayed_cash_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify `delayedLast`-only fallback (`delayedBid`/`delayedAsk` == -1.0) vs true halt (`delayedLast == -1.0`),
+    never trading off `delayedClose`, plus `60 bps` worst-case cash cap reservation on delayed quotes.
+    """
+    plan = _make_plan(
+        market="US",
+        targets=[
+            PlanTarget(
+                symbol="AAPL.US",
+                ibkr_symbol="AAPL",
+                market="US",
+                exchange="SMART",
+                currency="USD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.30000000"),
+                sleeve_contributions={"us_sector_quality_mom_v1": "0.30000000"},
+                ref_close=Decimal("200.00"),
+                lot_size=1,
+                defensive_fallback="SHY.US",
+                is_defensive_fallback=False,
+            ),
+            PlanTarget(
+                symbol="DIS.US",
+                ibkr_symbol="DIS",
+                market="US",
+                exchange="SMART",
+                currency="USD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.30000000"),
+                sleeve_contributions={"us_sector_quality_mom_v1": "0.30000000"},
+                ref_close=Decimal("100.00"),
+                lot_size=1,
+                defensive_fallback="SHY.US",
+                is_defensive_fallback=False,
+            ),
+        ],
+    )
+    server = FakeTwsServer(
+        usd_cash=100_000.0,
+        usd_settled_cash=100_000.0,
+        has_live_equity_subscription=False,
+        delayed_quotes={
+            # Empty post-open delayed BBO (-1.0 / -1.0), positive sub-penny delayedLast=200.005 -> (200.00, 200.01)
+            "AAPL.US": (-1.0, -1.0, 200.005, 198.00),
+            # Halted / untraded symbol: delayedLast=-1.0 even though delayedClose=100.00 -> MUST be HALTED_OR_NO_QUOTE!
+            "DIS.US": (-1.0, -1.0, -1.0, 100.00),
+            "SHY.US": (99.99, 100.01, 100.00, 100.00),
+            # HK delayedLast-only check
+            "0002.HK": (-1.0, -1.0, 81.05, 80.50),
+        },
+    )
+    server.set_quote("AAPL.US", bid=200.18, ask=200.20, close=200.00)
+    server.set_quote("DIS.US", bid=0.0, ask=0.0, close=100.00)
+    server.set_quote("SHY.US", bid=99.99, ask=100.01, close=100.00)
+    server.set_quote("0002.HK", bid=81.05, ask=81.10, close=80.50)
+    _install_fake_ib(monkeypatch, server)
+
+    with IbAsyncBrokerAdapter() as adapter:
+        q_chk = adapter.get_quotes(["AAPL.US", "DIS.US", "0002.HK"])
+        assert q_chk["AAPL.US"].is_valid is True and q_chk["AAPL.US"].is_delayed is True
+        assert q_chk["AAPL.US"].bid == pytest.approx(200.00)
+        assert q_chk["AAPL.US"].ask == pytest.approx(200.01)
+        assert q_chk["0002.HK"].is_valid is True and q_chk["0002.HK"].is_delayed is True
+        assert q_chk["0002.HK"].bid == pytest.approx(81.05)
+        assert q_chk["0002.HK"].ask == pytest.approx(81.05)
+        assert q_chk["DIS.US"].is_valid is False and q_chk["DIS.US"].is_delayed is False
+
+        rep = execute_market_rebalance(
+            plan,
+            adapter,
+            market="US",
+            dry_run=False,
+            config=ExecutionPolicyConfig(poll_interval_sec=0.05),
+        )
+    dec = {d.symbol: d for d in rep.batch.decisions}
+    assert dec["AAPL.US"].action == ActionCode.BUY_NORMAL
+    assert dec["DIS.US"].action == ActionCode.HALTED_OR_NO_QUOTE
+    assert "AAPL.US" in server.holdings
+    assert "DIS.US" not in server.holdings
+
+    # Verify 60 bps worst-case walk reservation on delayed OrderSpec vs 25 bps on live OrderSpec:
+    # At $10,050 spendable cash, 100 sh @ $100 arrival_mid costs $10,040.04 at +25 bps+15 bps (fits 100 sh),
+    # whereas delayed +60 bps+15 bps costs $10,075.09 -> MUST scale down to 99 shares!
+    live_spec = OrderSpec(
+        intent_id="live-cap",
+        symbol="AAPL.US",
+        ibkr_symbol="AAPL",
+        exchange="SMART",
+        currency="USD",
+        asset_class="stock",
+        side="BUY",
+        quantity=100,
+        lot_size=1,
+        limit_price=Decimal("100.08"),
+        arrival_mid=100.0,
+        style="ADAPTIVE_NORMAL",
+        phase="PHASE_B_BUY",
+        delayed_quote=False,
+    )
+    delayed_spec = OrderSpec(
+        intent_id="delayed-cap",
+        symbol="AAPL.US",
+        ibkr_symbol="AAPL",
+        exchange="SMART",
+        currency="USD",
+        asset_class="stock",
+        side="BUY",
+        quantity=100,
+        lot_size=1,
+        limit_price=Decimal("100.25"),
+        arrival_mid=100.0,
+        style="ADAPTIVE_NORMAL",
+        phase="PHASE_B_BUY",
+        delayed_quote=True,
+    )
+    pol_cfg = ExecutionPolicyConfig()
+    capped_live, _ = apply_cash_cap_to_buys([live_spec], spendable_cash=10_050.0, config=pol_cfg)
+    capped_delayed, warn_d = apply_cash_cap_to_buys(
+        [delayed_spec], spendable_cash=10_050.0, config=pol_cfg
+    )
+    assert capped_live[0].quantity == 100
+    assert capped_delayed[0].quantity == 99
+    assert len(warn_d) == 1
+
+
+def test_e2e_cli_load_env_file_defaults_and_xdg_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify `cli.main` loads `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `IBKR_ACCOUNT`, and
+    `IBKR_MARKET_DATA_TYPE` from `$XDG_CONFIG_HOME/fundconnect-bot/env` and `./.env`.
+    """
+    for env_key in (
+        "IBKR_HOST",
+        "IBKR_PORT",
+        "IBKR_CLIENT_ID",
+        "IBKR_ACCOUNT",
+        "IBKR_MARKET_DATA_TYPE",
+    ):
+        monkeypatch.delenv(env_key, raising=False)
+
+    xdg_dir = tmp_path / "xdg_cfg"
+    user_env = xdg_dir / "fundconnect-bot" / "env"
+    user_env.parent.mkdir(parents=True, exist_ok=True)
+    user_env.write_text(
+        "# User-level config overrides repo .env\n"
+        'export IBKR_PORT="4002"\n'
+        "IBKR_ACCOUNT='DU_XDG_777' # inline comment\n"
+        "IBKR_MARKET_DATA_TYPE=3\n",
+        encoding="utf-8",
+    )
+
+    repo_dir = tmp_path / "repo_cwd"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / ".env").write_text(
+        "IBKR_HOST=127.0.0.2\n"
+        "IBKR_PORT=4099\n"
+        "IBKR_CLIENT_ID=31\n"
+        "IBKR_ACCOUNT=DU_DOTENV_IGNORED\n"
+        "IBKR_MARKET_DATA_TYPE=1\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_dir))
+    monkeypatch.chdir(repo_dir)
+
+    plan = _make_plan(
+        market="US",
+        targets=[
+            PlanTarget(
+                symbol="SHY.US",
+                ibkr_symbol="SHY",
+                market="US",
+                exchange="SMART",
+                currency="USD",
+                asset_class="etf",
+                portfolio_weight=Decimal("0.40000000"),
+                sleeve_contributions={"us_macro_allweather_v1": "0.40000000"},
+                ref_close=Decimal("100.00"),
+                lot_size=1,
+                defensive_fallback="SHY.US",
+                is_defensive_fallback=True,
+            )
+        ],
+    )
+    plan_path = save_weekly_plan(plan, repo_dir / "plan_env.json")
+
+    connected_calls: list[tuple[str, int, int, str, int]] = []
+    server = FakeTwsServer(
+        account_id="DU_XDG_777",
+        usd_cash=50_000.0,
+        usd_settled_cash=50_000.0,
+        has_live_equity_subscription=False,
+        delayed_quotes={"SHY.US": (99.99, 100.01, 100.00, 100.00)},
+    )
+    server.set_quote("SHY.US", bid=100.14, ask=100.16, close=100.00)
+
+    fake_mod = build_fake_ib_async_module(server)
+    orig_ib_factory = fake_mod.IB
+
+    def _tracking_ib_factory() -> FakeIB:
+        ib_inst: FakeIB = orig_ib_factory()
+        orig_connect = ib_inst.connect
+        orig_req_mdt = ib_inst.reqMarketDataType
+
+        def _wrapped_connect(
+            host: str = "127.0.0.1",
+            port: int = 4002,
+            clientId: int = 1,
+            timeout: float = 15.0,
+            account: str = "",
+        ) -> FakeIB:
+            res = orig_connect(
+                host=host, port=port, clientId=clientId, timeout=timeout, account=account
+            )
+            connected_calls.append((host, port, clientId, account, ib_inst.market_data_type))
+            return res
+
+        def _wrapped_req_mdt(marketDataType: int) -> None:
+            orig_req_mdt(marketDataType)
+            if connected_calls:
+                h, p, cid, acc, _ = connected_calls[-1]
+                connected_calls[-1] = (h, p, cid, acc, marketDataType)
+
+        ib_inst.connect = _wrapped_connect  # type: ignore[method-assign]
+        ib_inst.reqMarketDataType = _wrapped_req_mdt  # type: ignore[method-assign]
+        return ib_inst
+
+    fake_mod.IB = _tracking_ib_factory  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ib_async", fake_mod)
+
+    rc = cli_main(
+        [
+            "execute",
+            "--plan",
+            str(plan_path),
+            "--market",
+            "US",
+            "--live",
+            "--state-dir",
+            str(repo_dir / "state"),
+        ]
+    )
+    assert rc == 0
+    assert connected_calls == [("127.0.0.2", 4002, 31, "DU_XDG_777", 3)]
+    assert "SHY.US" in server.holdings
+    assert server.orders[0].account == "DU_XDG_777"
+
 
 

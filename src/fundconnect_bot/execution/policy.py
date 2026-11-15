@@ -218,6 +218,17 @@ def _select_style_and_limit(
         return style, round_market_price(mid, side, market=market, symbol=symbol)
 
     style = "ADAPTIVE_NORMAL" if (use_adaptive and market == "US") else "MARKETABLE_LIMIT"
+    if quote.is_delayed:
+        if side == "BUY":
+            max_cap = mid * (1.0 + config.delayed_max_slippage_bps / 10_000.0)
+            init_cap = mid * (1.0 + config.delayed_initial_limit_bps / 10_000.0)
+            raw_px = min(max(quote.ask, init_cap), max_cap)
+            return style, round_market_price(raw_px, "BUY", market=market, symbol=symbol)
+        min_cap = mid * (1.0 - config.delayed_max_slippage_bps / 10_000.0)
+        init_floor = mid * (1.0 - config.delayed_initial_limit_bps / 10_000.0)
+        raw_px = max(min(quote.bid, init_floor), min_cap)
+        return style, round_market_price(raw_px, "SELL", market=market, symbol=symbol)
+
     if side == "BUY":
         max_cap = mid * (1.0 + config.max_slippage_bps / 10_000.0)
         init_cap = mid * (1.0 + config.initial_limit_bps / 10_000.0)
@@ -252,6 +263,28 @@ def compute_walked_limit_price(
     max_sp = config.max_spread_bps_hk if mkt == "HK" else config.max_spread_bps_us
     if live_quote.spread_bps > max_sp:
         return None
+
+    if spec.delayed_quote:
+        bps = min(
+            config.delayed_max_slippage_bps,
+            config.delayed_initial_limit_bps + step_num * config.delayed_walk_step_bps,
+        )
+        if spec.side == "BUY":
+            hard_cap = spec.arrival_mid * (1.0 + config.delayed_max_slippage_bps / 10_000.0)
+            raw_new = min(
+                max(live_quote.ask, spec.arrival_mid * (1.0 + bps / 10_000.0)),
+                hard_cap,
+            )
+            rounded = round_market_price(raw_new, "BUY", market=mkt, symbol=spec.symbol)
+            return rounded if rounded > spec.limit_price else None
+
+        hard_floor = spec.arrival_mid * (1.0 - config.delayed_max_slippage_bps / 10_000.0)
+        raw_new = max(
+            min(live_quote.bid, spec.arrival_mid * (1.0 - bps / 10_000.0)),
+            hard_floor,
+        )
+        rounded = round_market_price(raw_new, "SELL", market=mkt, symbol=spec.symbol)
+        return rounded if rounded < spec.limit_price else None
 
     bps = min(
         config.max_slippage_bps,
@@ -553,6 +586,7 @@ def build_execution_batch(
                 slice_index=s_idx,
                 slice_count=len(raw_slices),
                 reason=action.value,
+                delayed_quote=q.is_delayed,
             )
             if side == "SELL":
                 phase_a_sells.append(spec)
@@ -886,6 +920,23 @@ def build_execution_batch(
                 note=note_txt,
             )
 
+    evaluated_syms = list(all_non_def_syms)
+    if def_eff > 0.0 or def_cur_qty > 0:
+        evaluated_syms.append(defensive_sym)
+    delayed_count = sum(
+        1
+        for s in evaluated_syms
+        if (dq := quotes.get(s)) is not None and dq.is_valid and dq.is_delayed
+    )
+    if delayed_count > 0:
+        alerts.insert(
+            0,
+            f"[DELAYED_QUOTE_MODE] Using free IBKR 15m delayed quotes for {delayed_count} "
+            f"symbol(s); protective limit band widened to "
+            f"{config.delayed_initial_limit_bps:g}..{config.delayed_max_slippage_bps:g} bps "
+            f"(server-side Adaptive / SEHK fills at live spread).",
+        )
+
     # Deterministic sort: Sells by symbol+slice, Buys with non-defensive first then defensive
     phase_a_sells.sort(key=lambda o: (o.symbol, o.slice_index))
     phase_b_buys.sort(key=lambda o: (o.symbol == defensive_sym, o.symbol, o.slice_index))
@@ -918,9 +969,12 @@ def _unit_cost_with_fee(spec: OrderSpec, config: ExecutionPolicyConfig) -> float
         and spec.style != "PROTECTIVE_FLOOR_LIMIT"
         and config.max_walk_steps > 0
     ):
+        slip_bps = (
+            config.delayed_max_slippage_bps if spec.delayed_quote else config.max_slippage_bps
+        )
         worst_px = max(
             float(spec.limit_price),
-            spec.arrival_mid * (1.0 + config.max_slippage_bps / 10_000.0),
+            spec.arrival_mid * (1.0 + slip_bps / 10_000.0),
         )
     else:
         worst_px = float(spec.limit_price)

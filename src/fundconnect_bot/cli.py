@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -43,6 +44,44 @@ from .strategies.composite import (
 DEFAULT_LOCAL_DATA_DIR = Path("/home/obscure/fundconnect-ibkr-bot/data")
 DEFAULT_FALLBACK_US_CACHE = Path("/home/obscure/TradeMaster/data/fundconnect_us")
 DEFAULT_FALLBACK_HK_CACHE = Path("/home/obscure/TradeMaster/data/fundconnect_hk")
+
+
+def load_env_file_defaults(env_paths: Sequence[Path] | None = None) -> dict[str, str]:
+    """Populate missing `os.environ` keys from `~/.config/fundconnect-bot/env` and `./.env`."""
+    xdg_cfg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    user_cfg_dir = Path(xdg_cfg).expanduser() if xdg_cfg else (Path.home() / ".config")
+    candidates: tuple[Path, ...] = (
+        tuple(env_paths)
+        if env_paths is not None
+        else (user_cfg_dir / "fundconnect-bot" / "env", Path(".env"))
+    )
+    loaded: dict[str, str] = {}
+    for env_path in candidates:
+        if not env_path.is_file():
+            continue
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            raw_key, raw_val = line.split("=", 1)
+            key = raw_key.strip()
+            if not key:
+                continue
+            val = raw_val.strip()
+            if val and val[0] in ('"', "'"):
+                end_idx = val.find(val[0], 1)
+                if end_idx != -1:
+                    val = val[1:end_idx]
+            elif " #" in val:
+                val = val.split(" #", 1)[0].rstrip()
+            if key not in os.environ:
+                os.environ.setdefault(key, val)
+                loaded[key] = val
+    return loaded
 
 
 def _resolve_cache_dirs(
@@ -90,8 +129,8 @@ def _format_plan_markdown(plan: WeeklyPlan) -> str:
         f"# 周一自动调仓计划书 (`asof={plan.asof_date.isoformat()}`)",
         "",
         f"- **计划哈希 (`plan_sha256`)**: `{plan.plan_sha256}`",
-        f"- **港股执行交易日**: `{plan.hk_execution_session.isoformat()}` (`09:32 HKT`, 节假日顺延=`{plan.hk_deferred_holiday}`)",
-        f"- **美股执行交易日**: `{plan.us_execution_session.isoformat()}` (美东 `09:32 ET` -> 香港时间 `{plan.us_open_hkt}`, 节假日顺延=`{plan.us_deferred_holiday}`)",
+        f"- **港股执行交易日**: `{plan.hk_execution_session.isoformat()}` (`09:48 HKT`, 节假日顺延=`{plan.hk_deferred_holiday}`)",
+        f"- **美股执行交易日**: `{plan.us_execution_session.isoformat()}` (美东 `09:48 ET` / 开盘 `{plan.us_open_hkt}`, 节假日顺延=`{plan.us_deferred_holiday}`)",
         "- **四策略组合配比**: `35% us_macro_allweather_v1` + `35% us_sector_quality_mom_v1` + `20% hk_etf_southbound_rot_v1` + `10% hk_southbound_bluechip_v1`",
         f"- **目标总仓位**: `{Decimal(plan.summary['total_invested_weight']):.2%}` (美股 `{Decimal(plan.summary['us_invested_weight']):.2%}` + 港股 `{Decimal(plan.summary['hk_invested_weight']):.2%}`，现金缓冲 `{Decimal(plan.summary['total_cash_buffer_weight']):.2%}`)",
         "",
@@ -201,6 +240,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
             port=args.port,
             client_id=args.client_id,
             account=args.account,
+            market_data_type=args.market_data_type,
         )
         with IbAsyncBrokerAdapter(ib_cfg) as broker:
             pos = broker.get_positions()
@@ -367,9 +407,9 @@ def _cmd_simulate_monday(args: argparse.Namespace) -> int:
         "",
         "## 零融资利息 (Zero-Margin-Interest) 首次建仓交收指引",
         "",
-        "- **Monday 22:32 HKT (`09:32 ET`)**: 执行 `US` 阶段：Phase A 卖出全部 `9,946` 股 `SGOV.US`（`T+1` 周二交收），Phase B 同市场买入 `68.25%` 美股组合（同为 `T+1` 周二交收，**0 融资利息**），保留 `$317,500 USD` 现金。",
+        "- **Monday 22:48 HKT (`09:48 ET`)**: 执行 `US` 阶段：Phase A 卖出全部 `9,946` 股 `SGOV.US`（`T+1` 周二交收），Phase B 同市场买入 `68.25%` 美股组合（同为 `T+1` 周二交收，**0 融资利息**），保留 `$317,500 USD` 现金。",
         "- **Tuesday 21:30 HKT (美股 `T+1` 现金交收完成后)**: 提交 `IDEALPRO` `USD.HKD` 换汇 `$300,000 USD -> ~HK$2,340,000 HKD`（完全使用已交收美元，避免隔夜货币借贷利息）。",
-        "- **港股已交收现金到账后 (`09:32 HKT`)**: 执行 `HK` 阶段，程序自动校验 `SettledCash(HKD)` 上限，按精确每手股数与 HKEX 价位表买入 `3053.HK` 与 7 只南向蓝筹股，全程 **0 港元融资利息**。",
+        "- **港股已交收现金到账后 (`09:48 HKT`)**: 执行 `HK` 阶段，程序自动校验 `SettledCash(HKD)` 上限，按精确每手股数与 HKEX 价位表买入 `3053.HK` 与 7 只南向蓝筹股，全程 **0 港元融资利息**。",
     ]
     print("\n".join(sections))
     return 0
@@ -407,6 +447,7 @@ def _cmd_execute(args: argparse.Namespace) -> int:
         port=args.port,
         client_id=args.client_id,
         account=args.account,
+        market_data_type=args.market_data_type,
     )
     pol_cfg = ExecutionPolicyConfig()
 
@@ -430,6 +471,7 @@ def _cmd_execute(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    ib_defaults = IbkrConnectionConfig.from_env()
     parser = argparse.ArgumentParser(
         prog="fundconnect-bot",
         description="Weekly composite portfolio calculator & gap-safe IBKR execution bot.",
@@ -459,10 +501,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read live IBKR holdings for week-to-week hysteresis & drift bands",
     )
-    p_plan.add_argument("--host", type=str, default="127.0.0.1")
-    p_plan.add_argument("--port", type=int, default=4002)
-    p_plan.add_argument("--client-id", type=int, default=26)
-    p_plan.add_argument("--account", type=str, default="")
+    p_plan.add_argument("--host", type=str, default=ib_defaults.host)
+    p_plan.add_argument("--port", type=int, default=ib_defaults.port)
+    p_plan.add_argument("--client-id", type=int, default=ib_defaults.client_id)
+    p_plan.add_argument("--account", type=str, default=ib_defaults.account)
+    p_plan.add_argument(
+        "--market-data-type",
+        type=int,
+        choices=[1, 2, 3, 4],
+        default=ib_defaults.market_data_type,
+        help="IBKR market data type (1=Live, 2=Frozen, 3=Delayed, 4=Delayed-Frozen; default 4)",
+    )
     p_plan.set_defaults(func=_cmd_plan)
 
     # 2. simulate-monday
@@ -512,16 +561,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Submit IDEALPRO USD.HKD FX conversion order",
     )
     p_exec.add_argument("--state-dir", type=Path, default=Path("state"))
-    p_exec.add_argument("--host", type=str, default="127.0.0.1")
-    p_exec.add_argument("--port", type=int, default=4002)
-    p_exec.add_argument("--client-id", type=int, default=26)
-    p_exec.add_argument("--account", type=str, default="")
+    p_exec.add_argument("--host", type=str, default=ib_defaults.host)
+    p_exec.add_argument("--port", type=int, default=ib_defaults.port)
+    p_exec.add_argument("--client-id", type=int, default=ib_defaults.client_id)
+    p_exec.add_argument("--account", type=str, default=ib_defaults.account)
+    p_exec.add_argument(
+        "--market-data-type",
+        type=int,
+        choices=[1, 2, 3, 4],
+        default=ib_defaults.market_data_type,
+        help="IBKR market data type (1=Live, 2=Frozen, 3=Delayed, 4=Delayed-Frozen; default 4)",
+    )
     p_exec.set_defaults(func=_cmd_execute)
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env_file_defaults()
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))

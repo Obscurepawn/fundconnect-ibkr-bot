@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/fundconnect-ibkr-bot
-EnvironmentFile=%h/fundconnect-ibkr-bot/.env
+EnvironmentFile=-%h/fundconnect-ibkr-bot/.env
+EnvironmentFile=-%E/fundconnect-bot/env
 ExecStart=%h/fundconnect-ibkr-bot/.venv/bin/fundconnect-bot plan --refresh-data --sync-ibkr-holdings --data-dir data --out-dir plans
 StandardOutput=append:%h/fundconnect-ibkr-bot/logs/plan.log
 StandardError=append:%h/fundconnect-ibkr-bot/logs/plan.log

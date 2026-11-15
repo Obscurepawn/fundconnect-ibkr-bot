@@ -2,55 +2,55 @@
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
 \* ============================ var <-> code map ============================
-\* CONSTANTS (read from src/fundconnect_bot/config.py:122-240)
+\* CONSTANTS (read from src/fundconnect_bot/config.py:122-253)
 \*   LotS1             - board lot for "0002.HK" Part A stock (src/fundconnect_bot/config.py:133)
 \*   LotS2             - board lot for "2828.HK" Part D ETF   (src/fundconnect_bot/config.py:124)
-\*   InitQtySet        - initial share holdings per non-def   (src/fundconnect_bot/execution/policy.py:618)
-\*   BaseBudgetSet     - planned target notional (cents)      (src/fundconnect_bot/execution/policy.py:619-623)
-\*   DefBaseBudget     - defensive sleeve base notional       (src/fundconnect_bot/execution/policy.py:827-831)
-\*   QuoteRegimes      - quote shock/spread/boundary regimes  (src/fundconnect_bot/execution/policy.py:626-823)
+\*   InitQtySet        - initial share holdings per non-def   (src/fundconnect_bot/execution/policy.py:652)
+\*   BaseBudgetSet     - planned target notional (cents)      (src/fundconnect_bot/execution/policy.py:653-657)
+\*   DefBaseBudget     - defensive sleeve base notional       (src/fundconnect_bot/execution/policy.py:861-865)
+\*   QuoteRegimes      - quote shock/spread/boundary regimes  (src/fundconnect_bot/execution/policy.py:660-857)
 \*   MinNotionalCents  - min_trade_hkd churn threshold        (src/fundconnect_bot/config.py:218)
 \*
 \* VARIABLES
-\*   stage             - pipeline cursor in build_execution_batch (src/fundconnect_bot/execution/policy.py:616-906)
+\*   stage             - pipeline cursor in build_execution_batch (src/fundconnect_bot/execution/policy.py:650-957)
 \*                       DENOTES: control-flow progress {S1, S2, DEF, SORT, EXEC, DONE}
-\*   cur_qty           - held shares map per symbol           (src/fundconnect_bot/execution/policy.py:310-313)
+\*   cur_qty           - held shares map per symbol           (src/fundconnect_bot/execution/policy.py:344-346)
 \*                       DENOTES: point-in-time non-negative integer position snapshot
-\*   base_notional     - planned target notional (cents)      (src/fundconnect_bot/execution/policy.py:619-623)
+\*   base_notional     - planned target notional (cents)      (src/fundconnect_bot/execution/policy.py:653-657)
 \*                       DENOTES: w_i * total_eq_local upper budget boundary per symbol
-\*   q_regime          - live quote scenario per non-def sym  (src/fundconnect_bot/execution/policy.py:624)
+\*   q_regime          - live quote scenario per non-def sym  (src/fundconnect_bot/execution/policy.py:658)
 \*                       DENOTES: immutable Level-1 Quote snapshot at batch construction
-\*   eff_notional      - post-gap effective notional (cents)  (src/fundconnect_bot/execution/policy.py:390)
+\*   eff_notional      - post-gap effective notional (cents)  (src/fundconnect_bot/execution/policy.py:423)
 \*                       DENOTES: gap-adjusted target notional per symbol
-\*   sym_redirected    - notional routed to defensive per sym (src/fundconnect_bot/execution/policy.py:391)
+\*   sym_redirected    - notional routed to defensive per sym (src/fundconnect_bot/execution/policy.py:424)
 \*                       DENOTES: unspent incremental buy budget redirected to 3053.HK
-\*   redirected_def    - cumulative redirected_defensive      (src/fundconnect_bot/execution/policy.py:332)
-\*                       DENOTES: accumulator added to def_base at step 2 (policy.py:832)
-\*   decisions         - recorded InstrumentDecision map      (src/fundconnect_bot/execution/policy.py:328)
+\*   redirected_def    - cumulative redirected_defensive      (src/fundconnect_bot/execution/policy.py:365)
+\*                       DENOTES: accumulator added to def_base at step 2 (src/fundconnect_bot/execution/policy.py:866)
+\*   decisions         - recorded InstrumentDecision map      (src/fundconnect_bot/execution/policy.py:361)
 \*                       DENOTES: per-symbol ActionCode + desired_total_qty audit record
-\*   phase_a_sells     - emitted Phase A sell OrderSpec seq   (src/fundconnect_bot/execution/policy.py:329)
+\*   phase_a_sells     - emitted Phase A sell OrderSpec seq   (src/fundconnect_bot/execution/policy.py:362)
 \*                       DENOTES: sell batch sorted by (symbol, slice_index)
-\*   phase_b_buys      - emitted Phase B buy OrderSpec seq    (src/fundconnect_bot/execution/policy.py:330)
+\*   phase_b_buys      - emitted Phase B buy OrderSpec seq    (src/fundconnect_bot/execution/policy.py:363)
 \*                       DENOTES: buy batch sorted by (symbol == def, symbol, slice_index)
-\*   exec_queue        - concatenated Phase A -> Phase B seq  (src/fundconnect_bot/execution/policy.py:1132-1314)
+\*   exec_queue        - concatenated Phase A -> Phase B seq  (src/fundconnect_bot/execution/policy.py:1186-1368)
 \*                       DENOTES: remaining orders to dispatch in two-phase order
-\*   exec_log          - dispatched orders sequence           (src/fundconnect_bot/execution/policy.py:1132-1314)
+\*   exec_log          - dispatched orders sequence           (src/fundconnect_bot/execution/policy.py:1186-1368)
 \*                       DENOTES: witness trace for SellBeforeBuyDeterministicOrder
 \*
 \* ACTIONS
-\*   EvalHaltedOrNoQuote      - invalid/halted quote skip     (src/fundconnect_bot/execution/policy.py:626-646)
-\*   EvalSellFlashCrashGuard  - gap < -12% protective floor   (src/fundconnect_bot/execution/policy.py:655-675)
-\*   EvalSellSlicedTwap       - gap in [-12%, -5%) 3-slice    (src/fundconnect_bot/execution/policy.py:676-696)
-\*   EvalSellNormal           - gap >= -5% normal sell/trim   (src/fundconnect_bot/execution/policy.py:697-714)
-\*   EvalHoldAtTarget         - ideal_qty == cur_qty hold     (src/fundconnect_bot/execution/policy.py:717-735)
-\*   EvalBuySkipAdverseGapDown- gap < -3% falling-knife veto  (src/fundconnect_bot/execution/policy.py:737-758)
-\*   EvalBuySkipGapUp         - gap > +6% anti-chase veto     (src/fundconnect_bot/execution/policy.py:759-780)
-\*   EvalBuyStaged50          - gap in (+3%, +6%] 50% staged  (src/fundconnect_bot/execution/policy.py:781-806)
-\*   EvalBuyNormal            - mild gap [-3%, +3%] + wide sp (src/fundconnect_bot/execution/policy.py:807-823)
-\*   EvalDefensiveFallback    - 3053.HK absorbs redirected    (src/fundconnect_bot/execution/policy.py:826-887)
-\*   SortAndFinalizeBatch     - deterministic Phase A/B sort  (src/fundconnect_bot/execution/policy.py:890-906)
-\*   ExecuteBatchStep         - dispatch Phase A before B     (src/fundconnect_bot/execution/policy.py:1132-1314)
-\*   BatchDone                - terminal completion stutter   (src/fundconnect_bot/execution/policy.py:1331-1340)
+\*   EvalHaltedOrNoQuote      - invalid/halted quote skip     (src/fundconnect_bot/execution/policy.py:660-680)
+\*   EvalSellFlashCrashGuard  - gap < -12% protective floor   (src/fundconnect_bot/execution/policy.py:689-709)
+\*   EvalSellSlicedTwap       - gap in [-12%, -5%) 3-slice    (src/fundconnect_bot/execution/policy.py:710-730)
+\*   EvalSellNormal           - gap >= -5% normal sell/trim   (src/fundconnect_bot/execution/policy.py:731-748)
+\*   EvalHoldAtTarget         - ideal_qty == cur_qty hold     (src/fundconnect_bot/execution/policy.py:751-769)
+\*   EvalBuySkipAdverseGapDown- gap < -3% falling-knife veto  (src/fundconnect_bot/execution/policy.py:771-792)
+\*   EvalBuySkipGapUp         - gap > +6% anti-chase veto     (src/fundconnect_bot/execution/policy.py:793-814)
+\*   EvalBuyStaged50          - gap in (+3%, +6%] 50% staged  (src/fundconnect_bot/execution/policy.py:815-840)
+\*   EvalBuyNormal            - mild gap [-3%, +3%] + wide sp (src/fundconnect_bot/execution/policy.py:841-857)
+\*   EvalDefensiveFallback    - 3053.HK absorbs redirected    (src/fundconnect_bot/execution/policy.py:860-921)
+\*   SortAndFinalizeBatch     - deterministic Phase A/B sort  (src/fundconnect_bot/execution/policy.py:940-957)
+\*   ExecuteBatchStep         - dispatch Phase A before B     (src/fundconnect_bot/execution/policy.py:1186-1368)
+\*   BatchDone                - terminal completion stutter   (src/fundconnect_bot/execution/policy.py:1385-1394)
 \*
 \* FAULTS MODELED: none (faithful transcription; halted/wide-spread quotes in Init domain).
 \* =========================================================================
@@ -141,7 +141,7 @@ BidCents(s, reg) ==
     ELSE IF reg = "WIDE_MILD" THEN m - ((m * 45) \div 10000) - 1
     ELSE m - 4
 
-\* Gap in basis points: (mid - ref_close) * 10000 \div ref_close (src/fundconnect_bot/execution/policy.py:650)
+\* Gap in basis points: (mid - ref_close) * 10000 \div ref_close (src/fundconnect_bot/execution/policy.py:684)
 GapBps(s, reg) ==
     LET rc == RefCloseCents(s)
         m  == MidCents(s, reg)
@@ -204,7 +204,7 @@ SplitIntoLotSlices(total_qty, lot, num_slices) ==
                         + (IF i = eff THEN odd_rem ELSE 0)
                  IN [i \in 1..eff |-> RawSlice(i)]
 
-\* ---- Style & raw limit selection (src/fundconnect_bot/execution/policy.py:194-230) ----
+\* ---- Style & raw limit selection (src/fundconnect_bot/execution/policy.py:194-242) ----
 Min3(a, b, c) ==
     LET m == IF a < b THEN a ELSE b IN IF m < c THEN m ELSE c
 
@@ -223,19 +223,19 @@ SelectStyleAndLimit(s, side, reg, patient_override, flash_floor) ==
         \* PASSIVE_MID_LIMIT on HK (src/fundconnect_bot/execution/policy.py:214-218)
         [style |-> "PASSIVE_MID_LIMIT", raw_px |-> m, lmt_px |-> RoundHkexCents(m, side, s)]
     ELSE IF side = "BUY" THEN
-        \* min(ask, mid*(1+8bps), mid*(1+25bps)) (src/fundconnect_bot/execution/policy.py:221-225)
+        \* min(ask, mid*(1+8bps), mid*(1+25bps)) (src/fundconnect_bot/execution/policy.py:232-236)
         LET init_cap == (m * 10008) \div 10000
             max_cap  == (m * 10025) \div 10000
             raw_b    == Min3(AskCents(s, reg), init_cap, max_cap)
         IN [style |-> "MARKETABLE_LIMIT", raw_px |-> raw_b, lmt_px |-> RoundHkexCents(raw_b, "BUY", s)]
     ELSE
-        \* max(bid, mid*(1-8bps), mid*(1-25bps)) (src/fundconnect_bot/execution/policy.py:227-230)
+        \* max(bid, mid*(1-8bps), mid*(1-25bps)) (src/fundconnect_bot/execution/policy.py:238-241)
         LET init_flr == CeilDiv(m * 9992, 10000)
             min_cap  == CeilDiv(m * 9975, 10000)
             raw_s    == Max3(BidCents(s, reg), init_flr, min_cap)
         IN [style |-> "MARKETABLE_LIMIT", raw_px |-> raw_s, lmt_px |-> RoundHkexCents(raw_s, "SELL", s)]
 
-\* ---- Emit helper matching _emit_orders_and_decision (src/fundconnect_bot/execution/policy.py:356-613) ----
+\* ---- Emit helper matching _emit_orders_and_decision (src/fundconnect_bot/execution/policy.py:389-647) ----
 MakeOrderSeq(s, side, slices, style, raw_px, lmt_px, act_code) ==
     [i \in 1..Len(slices) |-> [
         symbol          |-> s,
@@ -287,7 +287,7 @@ EmitDecisionAndOrders(s, act, cur_q, desired_q, base_n, eff_n, redir, reg) ==
             /\ decisions'      = [decisions EXCEPT ![s] = [action |-> "SKIP_ALREADY_WORKING_OR_DONE", desired_qty |-> desired_q, delta_qty |-> 0]]
             /\ UNCHANGED <<phase_a_sells, phase_b_buys>>
         ELSE IF ~full_exit /\ (net_qty * m) < MinNotionalCents THEN
-            \* Min-notional churn filter (src/fundconnect_bot/execution/policy.py:478-504)
+            \* Min-notional churn filter (src/fundconnect_bot/execution/policy.py:511-537)
             /\ eff_notional'   = [eff_notional EXCEPT ![s] = eff_n]
             /\ sym_redirected' = [sym_redirected EXCEPT ![s] = redir]
             /\ decisions'      = [decisions EXCEPT ![s] = [action |-> "SKIP_BELOW_MIN_NOTIONAL", desired_qty |-> cur_q, delta_qty |-> 0]]
@@ -309,7 +309,7 @@ EmitDecisionAndOrders(s, act, cur_q, desired_q, base_n, eff_n, redir, reg) ==
                   ELSE /\ phase_b_buys'  = phase_b_buys \o ord_seq
                        /\ UNCHANGED phase_a_sells
 
-\* ---- Deterministic order comparator (src/fundconnect_bot/execution/policy.py:890-891) ----
+\* ---- Deterministic order comparator (src/fundconnect_bot/execution/policy.py:940-941) ----
 SymRank(s) == IF s = S1 THEN 1 ELSE IF s = S2 THEN 2 ELSE 3
 
 SellBefore(o1, o2) ==
@@ -364,12 +364,12 @@ Init ==
     /\ exec_queue     = << >>
     /\ exec_log       = << >>
 
-\* ---- Step 1: Non-defensive symbol evaluation actions (src/fundconnect_bot/execution/policy.py:616-824) ----
+\* ---- Step 1: Non-defensive symbol evaluation actions (src/fundconnect_bot/execution/policy.py:650-857) ----
 AdvanceNonDef ==
     stage' = IF stage = "S1" THEN "S2" ELSE "DEF"
 
 EvalHaltedOrNoQuote ==
-    \* src/fundconnect_bot/execution/policy.py:626-646
+    \* src/fundconnect_bot/execution/policy.py:660-680
     /\ stage \in {"S1", "S2"}
     /\ LET s   == CurrentSym
            reg == q_regime[s]
@@ -381,7 +381,7 @@ EvalHaltedOrNoQuote ==
           /\ AdvanceNonDef
 
 EvalSellFlashCrashGuard ==
-    \* src/fundconnect_bot/execution/policy.py:655-675 (gap_pct < -12.0%)
+    \* src/fundconnect_bot/execution/policy.py:689-709 (gap_pct < -12.0%)
     /\ stage \in {"S1", "S2"}
     /\ LET s     == CurrentSym
            reg   == q_regime[s]
@@ -398,7 +398,7 @@ EvalSellFlashCrashGuard ==
           /\ AdvanceNonDef
 
 EvalSellSlicedTwap ==
-    \* src/fundconnect_bot/execution/policy.py:676-696 (-12.0% <= gap_pct < -5.0%)
+    \* src/fundconnect_bot/execution/policy.py:710-730 (-12.0% <= gap_pct < -5.0%)
     /\ stage \in {"S1", "S2"}
     /\ LET s     == CurrentSym
            reg   == q_regime[s]
@@ -416,7 +416,7 @@ EvalSellSlicedTwap ==
           /\ AdvanceNonDef
 
 EvalSellNormal ==
-    \* src/fundconnect_bot/execution/policy.py:697-714 (gap_pct >= -5.0%)
+    \* src/fundconnect_bot/execution/policy.py:731-748 (gap_pct >= -5.0%)
     /\ stage \in {"S1", "S2"}
     /\ LET s     == CurrentSym
            reg   == q_regime[s]
@@ -433,7 +433,7 @@ EvalSellNormal ==
           /\ AdvanceNonDef
 
 EvalHoldAtTarget ==
-    \* src/fundconnect_bot/execution/policy.py:717-735 (ideal_qty_mid == cur_qty or inc_budget <= 0)
+    \* src/fundconnect_bot/execution/policy.py:751-769 (ideal_qty_mid == cur_qty or inc_budget <= 0)
     /\ stage \in {"S1", "S2"}
     /\ LET s     == CurrentSym
            reg   == q_regime[s]
@@ -450,7 +450,7 @@ EvalHoldAtTarget ==
           /\ AdvanceNonDef
 
 EvalBuySkipAdverseGapDown ==
-    \* src/fundconnect_bot/execution/policy.py:737-758 (gap_pct < -3.0% falling-knife veto)
+    \* src/fundconnect_bot/execution/policy.py:771-792 (gap_pct < -3.0% falling-knife veto)
     /\ stage \in {"S1", "S2"}
     /\ LET s     == CurrentSym
            reg   == q_regime[s]
@@ -470,7 +470,7 @@ EvalBuySkipAdverseGapDown ==
           /\ AdvanceNonDef
 
 EvalBuySkipGapUp ==
-    \* src/fundconnect_bot/execution/policy.py:759-780 (gap_pct > +6.0% anti-chase circuit breaker)
+    \* src/fundconnect_bot/execution/policy.py:793-814 (gap_pct > +6.0% anti-chase circuit breaker)
     /\ stage \in {"S1", "S2"}
     /\ LET s     == CurrentSym
            reg   == q_regime[s]
@@ -490,7 +490,7 @@ EvalBuySkipGapUp ==
           /\ AdvanceNonDef
 
 EvalBuyStaged50 ==
-    \* src/fundconnect_bot/execution/policy.py:781-806 (+3.0% < gap_pct <= +6.0% -> 50% staged + 50% redirect)
+    \* src/fundconnect_bot/execution/policy.py:815-840 (+3.0% < gap_pct <= +6.0% -> 50% staged + 50% redirect)
     /\ stage \in {"S1", "S2"}
     /\ LET s        == CurrentSym
            reg      == q_regime[s]
@@ -515,7 +515,7 @@ EvalBuyStaged50 ==
           /\ AdvanceNonDef
 
 EvalBuyNormal ==
-    \* src/fundconnect_bot/execution/policy.py:807-823 (-3.0% <= gap_pct <= +3.0%)
+    \* src/fundconnect_bot/execution/policy.py:841-857 (-3.0% <= gap_pct <= +3.0%)
     /\ stage \in {"S1", "S2"}
     /\ LET s     == CurrentSym
            reg   == q_regime[s]
@@ -534,7 +534,7 @@ EvalBuyNormal ==
           /\ UNCHANGED <<cur_qty, base_notional, q_regime, redirected_def, exec_queue, exec_log>>
           /\ AdvanceNonDef
 
-\* ---- Step 2: Defensive fallback sleeve evaluation (src/fundconnect_bot/execution/policy.py:826-887) ----
+\* ---- Step 2: Defensive fallback sleeve evaluation (src/fundconnect_bot/execution/policy.py:860-921) ----
 EvalDefensiveFallback ==
     /\ stage = "DEF"
     /\ LET cq      == cur_qty[SymDef]
@@ -554,7 +554,7 @@ EvalDefensiveFallback ==
           /\ stage' = "SORT"
           /\ UNCHANGED <<cur_qty, base_notional, q_regime, redirected_def, exec_queue, exec_log>>
 
-\* ---- Step 3: Deterministic sort & two-phase queue (src/fundconnect_bot/execution/policy.py:890-906) ----
+\* ---- Step 3: Deterministic sort & two-phase queue (src/fundconnect_bot/execution/policy.py:940-957) ----
 SortAndFinalizeBatch ==
     /\ stage = "SORT"
     /\ LET sorted_a == SortSells(phase_a_sells)
@@ -566,7 +566,7 @@ SortAndFinalizeBatch ==
           /\ stage'         = IF Len(combined) > 0 THEN "EXEC" ELSE "DONE"
           /\ UNCHANGED <<cur_qty, base_notional, q_regime, eff_notional, sym_redirected, redirected_def, decisions, exec_log>>
 
-\* ---- Step 4: Two-phase execution dispatch (src/fundconnect_bot/execution/policy.py:1132-1314) ----
+\* ---- Step 4: Two-phase execution dispatch (src/fundconnect_bot/execution/policy.py:1186-1368) ----
 ExecuteBatchStep ==
     /\ stage = "EXEC"
     /\ Len(exec_queue) > 0
@@ -578,7 +578,7 @@ ExecuteBatchStep ==
           /\ UNCHANGED <<cur_qty, base_notional, q_regime, eff_notional, sym_redirected, redirected_def, decisions, phase_a_sells, phase_b_buys>>
 
 BatchDone ==
-    \* src/fundconnect_bot/execution/policy.py:1331-1340
+    \* src/fundconnect_bot/execution/policy.py:1385-1394
     /\ stage = "DONE"
     /\ UNCHANGED vars
 

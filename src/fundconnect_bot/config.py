@@ -232,12 +232,17 @@ class ExecutionPolicyConfig:
     max_spread_bps_us: float = 35.0
     max_spread_bps_hk: float = 60.0
 
-    # Bounded Peg-to-Mid / walk-limit repricing parameters
+    # Bounded Peg-to-Mid / walk-limit repricing parameters (live Level-1 quotes)
     initial_limit_bps: float = 8.0
     walk_step_bps: float = 6.0
     max_walk_steps: int = 3
     max_slippage_bps: float = 25.0
     poll_interval_sec: float = 2.0
+
+    # Free IBKR 15m delayed-quote (`reqMarketDataType(3|4)`) protective limit parameters
+    delayed_initial_limit_bps: float = 25.0
+    delayed_walk_step_bps: float = 15.0
+    delayed_max_slippage_bps: float = 60.0
 
     # Zero-margin-interest cash reservation buffers
     us_fee_buffer_bps: float = 15.0   # 1.5 bps commission + safety buffer
@@ -256,6 +261,13 @@ class IbkrConnectionConfig:
     client_id: int = 26
     account: str = ""
     timeout_sec: float = 15.0
+    market_data_type: int = 4  # 1=Live, 2=Frozen, 3=Delayed, 4=Delayed-Frozen (free 15m fallback)
+
+    def __post_init__(self) -> None:
+        if self.market_data_type not in (1, 2, 3, 4):
+            raise ValueError(
+                f"market_data_type must be in (1, 2, 3, 4), got {self.market_data_type}"
+            )
 
     @classmethod
     def from_env(cls) -> IbkrConnectionConfig:
@@ -264,4 +276,7 @@ class IbkrConnectionConfig:
             port=int(os.environ.get("IBKR_PORT", "4002").strip() or "4002"),
             client_id=int(os.environ.get("IBKR_CLIENT_ID", "26").strip() or "26"),
             account=os.environ.get("IBKR_ACCOUNT", "").strip(),
+            market_data_type=int(
+                os.environ.get("IBKR_MARKET_DATA_TYPE", "4").strip() or "4"
+            ),
         )

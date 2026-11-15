@@ -35,14 +35,18 @@ uv venv --python 3.12
 uv pip install -e ".[ibkr,dev]"
 ```
 
-Configure credentials strictly via environment variables (never commit `.env` or hardcode keys):
+Configure credentials strictly via environment variables (never commit `.env` or hardcode keys). Both CLI commands and `systemd --user` units automatically load `~/.config/fundconnect-bot/env` (`$XDG_CONFIG_HOME/fundconnect-bot/env`) and `./.env` if present:
 
 ```bash
-cp .env.example .env
-chmod 600 .env
-# Edit .env and populate INDEXONE_API_KEY, TUSHARE_TOKEN, CRYPTORACLE_API_KEY, and IBKR_PORT=4002
+mkdir -p ~/.config/fundconnect-bot
+cp .env.example ~/.config/fundconnect-bot/env
+chmod 600 ~/.config/fundconnect-bot/env
+# Edit ~/.config/fundconnect-bot/env (or ./.env) to set INDEXONE_API_KEY, TUSHARE_TOKEN,
+# CRYPTORACLE_API_KEY, IBKR_PORT=4002, IBKR_ACCOUNT, and IBKR_MARKET_DATA_TYPE=4
 mkdir -p data plans state logs
 ```
+
+By default, `IBKR_MARKET_DATA_TYPE=4` (`Delayed-Frozen`) enables **zero-cost automated execution without paid IBKR Level-1 market data subscriptions**: unsubscribed accounts receive free 15-minute delayed quotes (`delayedBid` / `delayedAsk` / `delayedLast`), whereas subscribed accounts automatically receive real-time Type-1 quotes per IBKR TWS API rules.
 
 ---
 
@@ -61,7 +65,7 @@ Rather than blindly firing market orders at Monday's open, `fundconnect_bot.exec
 
 - **HKEX Spread Table & Board-Lot Compliance (`hkex_rules.py`)**: Rounds `BUY` limits down and `SELL` limits up onto exact HKEX Spread Table ticks across `0.01..9,995.00 HKD` (Part A equities including HKEX Phase 1 spread tiers, Part B `3053.HK` `0.05` tick, and Part D HKEX equity/gold ETFs) to prevent IBKR `Error 110`, while stripping SEHK leading zeros (`"0003.HK" -> Stock("3", "SEHK", "HKD")`) to prevent IBKR `Error 200`.
 - **Wide-Spread & Halt Guards**: Halted or crossed quotes (`bid <= 0`, `ask <= 0`, or `ask < bid`) trigger `HALTED_OR_NO_QUOTE` and skip safely; spreads wider than `35 bps` (US) or `60 bps` (HK) automatically downgrade orders to `PASSIVE_MID_LIMIT` / `ADAPTIVE_PATIENT`.
-- **Two-Phase Sell-Before-Buy & Bounded Walk-Limit**: Phase A executes all sells first (including `SGOV.US`) with up to 3 Peg-to-Mid limit reprices capped at `25 bps` max arrival slippage before Phase B sizes and caps buys against non-borrowed settled cash.
+- **Two-Phase Sell-Before-Buy & Bounded Walk-Limit (Live & Zero-Cost Delayed Mode)**: Phase A executes all sells first (including `SGOV.US`) with up to 3 Peg-to-Mid limit reprices capped at `25 bps` max arrival slippage on live quotes before Phase B sizes and caps buys against non-borrowed settled cash. When IBKR serves free 15-minute delayed quotes (`is_delayed=True`), the protective ceiling widens to `25..60 bps` (`15 bps` steps) without clamping to stale 15m bid/ask, while IBKR's server-side `Adaptive` algo (`SMART`) and SEHK matching engine still fill at the **real-time live spread (Price Improvement)** and Phase B reserves the full `60 bps` ceiling in cash capping.
 - **Idempotency**: Open IBKR orders (`openTrades`) and `state/execution_state_<YYYYMMDD>_<US|HK>.json` are reconciled before order creation so re-running a CLI or timer never double-submits orders.
 
 ---
@@ -86,7 +90,7 @@ Because US equities/ETFs (`SGOV.US`) settle **T+1** whereas `IDEALPRO` `USD.HKD`
 # 1. Monday 08:35 HKT: Compute fresh plan from live APIs
 .venv/bin/fundconnect-bot plan --refresh-data --data-dir data --out-dir plans
 
-# 2. Monday 09:32 ET (22:32 HKT in winter / 21:32 HKT in summer):
+# 2. Monday 09:48 ET (22:48 HKT in winter / 21:48 HKT in summer):
 #    Sell all 9,946 SGOV.US (T+1), buy 68.25% US targets (also T+1 -> 0 interest!),
 #    and reserve $300,000 USD unspent for the HK sleeve:
 .venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market US --bootstrap-fx-usd 300000 --dry-run
@@ -94,7 +98,7 @@ Because US equities/ETFs (`SGOV.US`) settle **T+1** whereas `IDEALPRO` `USD.HKD`
 
 # 3. Tuesday evening (after Monday's SGOV.US T+1 USD cash is settled):
 #    Convert settled $300,000 USD -> HKD on IDEALPRO (idempotency skips completed US equity legs),
-#    then execute HK leg at 09:32 HKT once SettledCash(HKD) is credited:
+#    then execute HK leg at 09:48 HKT once SettledCash(HKD) is credited:
 .venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market US --bootstrap-fx-usd 300000 --allow-fx-convert --live
 .venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market HK --dry-run
 .venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market HK --live
@@ -108,7 +112,7 @@ From Week 2 onward, USD and HKD sleeves rebalance within their own currencies on
 
 ### Option 1: `systemd --user` Timers (Recommended — Native US DST & Holiday Deferral)
 
-The units in [`deploy/`](deploy/) bind the US timer directly to `America/New_York` (`09:32:00 America/New_York`, which automatically shifts between `21:32 HKT` EDT and `22:32 HKT` EST) and fire `Mon,Tue,Wed` with `--enforce-session-date` so Monday holidays on `XNYS` or `XHKG` automatically defer to Tuesday's open:
+The units in [`deploy/`](deploy/) read optional `EnvironmentFile`s from both `~/fundconnect-ibkr-bot/.env` and `~/.config/fundconnect-bot/env`, bind execution to `09:48` local exchange time (`09:48:00 Asia/Hong_Kong` and `09:48:00 America/New_York`, which shifts between `21:48 HKT` EDT and `22:48 HKT` EST and ensures free 15m delayed quotes reflect post-open `09:33` continuous prints), and fire `Mon,Tue,Wed` with `--enforce-session-date` so Monday holidays on `XNYS` or `XHKG` automatically defer to Tuesday's open:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -120,19 +124,19 @@ systemctl --user list-timers 'fundconnect-*'
 
 ### Option 2: `crontab` Schedule
 
-If your Linux system uses `cron` with `CRON_TZ` support:
+If your Linux system uses `cron` with `CRON_TZ` support (note `cli.py` auto-loads `~/.config/fundconnect-bot/env` and `./.env`):
 
 ```cron
 # 1. Monday 08:35 HKT: Refresh IndexOne + Tushare + Cryptoracle and publish plans/latest_plan.json
 CRON_TZ=Asia/Hong_Kong
-35 8 * * 1 cd $HOME/fundconnect-ibkr-bot && set -a && . ./.env && set +a && .venv/bin/fundconnect-bot plan --refresh-data --sync-ibkr-holdings --data-dir data --out-dir plans >> logs/plan.log 2>&1
+35 8 * * 1 cd $HOME/fundconnect-ibkr-bot && .venv/bin/fundconnect-bot plan --refresh-data --sync-ibkr-holdings --data-dir data --out-dir plans >> logs/plan.log 2>&1
 
-# 2. Mon-Wed 09:32 HKT: Execute HKEX rebalance on plan.hk_execution_session
-32 9 * * 1-3 cd $HOME/fundconnect-ibkr-bot && set -a && . ./.env && set +a && .venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market HK --live --enforce-session-date --state-dir state >> logs/execute-hk.log 2>&1
+# 2. Mon-Wed 09:48 HKT: Execute HKEX rebalance on plan.hk_execution_session
+48 9 * * 1-3 cd $HOME/fundconnect-ibkr-bot && .venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market HK --live --enforce-session-date --state-dir state >> logs/execute-hk.log 2>&1
 
-# 3. Mon-Wed 09:32 America/New_York (DST-safe): Execute US SMART rebalance on plan.us_execution_session
+# 3. Mon-Wed 09:48 America/New_York (DST-safe): Execute US SMART rebalance on plan.us_execution_session
 CRON_TZ=America/New_York
-32 9 * * 1-3 cd $HOME/fundconnect-ibkr-bot && set -a && . ./.env && set +a && .venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market US --live --use-adaptive --enforce-session-date --state-dir state >> logs/execute-us.log 2>&1
+48 9 * * 1-3 cd $HOME/fundconnect-ibkr-bot && .venv/bin/fundconnect-bot execute --plan plans/latest_plan.json --market US --live --use-adaptive --enforce-session-date --state-dir state >> logs/execute-us.log 2>&1
 ```
 
 ---

@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol, Self, runtime_checkable
 
 from ..config import IbkrConnectionConfig
-from .hkex_rules import from_ibkr_position_symbol, to_ibkr_contract_fields
+from .hkex_rules import from_ibkr_position_symbol, round_market_price, to_ibkr_contract_fields
 
 type CurrencyCode = Literal["USD", "HKD"]
 type OrderSide = Literal["BUY", "SELL"]
@@ -34,6 +34,7 @@ class Quote:
     last: float
     prev_close: float
     timestamp_utc: str = ""
+    is_delayed: bool = False
 
     @property
     def is_valid(self) -> bool:
@@ -105,6 +106,7 @@ class OrderSpec:
     slice_index: int = 1
     slice_count: int = 1
     reason: str = ""
+    delayed_quote: bool = False
 
 
 @dataclass(frozen=True)
@@ -208,6 +210,8 @@ class IbAsyncBrokerAdapter:
             timeout=self.config.timeout_sec,
             account=self.config.account or "",
         )
+        if hasattr(ib, "reqMarketDataType"):
+            ib.reqMarketDataType(self.config.market_data_type)
         self._ib = ib
 
     def disconnect(self) -> None:
@@ -398,17 +402,59 @@ class IbAsyncBrokerAdapter:
         now_iso = datetime.now(UTC).isoformat()
         out: dict[str, Quote] = {}
         for sym, tk in zip(unique_syms, tickers, strict=True):
+            raw_mdt = getattr(tk, "marketDataType", 1)
+            try:
+                tk_mdt = int(raw_mdt) if raw_mdt is not None else 1
+            except (TypeError, ValueError):
+                tk_mdt = 1
             bid = _safe_pos_float(tk.bid)
             ask = _safe_pos_float(tk.ask)
-            last = _safe_pos_float(tk.last, fallback=0.5 * (bid + ask) if (bid and ask) else 0.0)
-            prev_c = _safe_pos_float(tk.close)
+            d_bid = _safe_pos_float(getattr(tk, "delayedBid", 0.0))
+            d_ask = _safe_pos_float(getattr(tk, "delayedAsk", 0.0))
+            prev_c = _safe_pos_float(tk.close) or _safe_pos_float(
+                getattr(tk, "delayedClose", 0.0)
+            )
+            raw_last = _safe_pos_float(tk.last) or _safe_pos_float(
+                getattr(tk, "delayedLast", 0.0)
+            )
+
+            eff_bid = 0.0
+            eff_ask = 0.0
+            is_delayed = False
+            if bid > 0.0 and ask >= bid:
+                eff_bid, eff_ask = bid, ask
+                is_delayed = tk_mdt in (3, 4)
+            elif d_bid > 0.0 and d_ask >= d_bid:
+                eff_bid, eff_ask = d_bid, d_ask
+                is_delayed = True
+            elif raw_last > 0.0:
+                mkt: Literal["HK", "US"] = "HK" if sym.endswith(".HK") else "US"
+                try:
+                    p_lo = float(round_market_price(raw_last, "BUY", market=mkt, symbol=sym))
+                    p_hi = float(round_market_price(raw_last, "SELL", market=mkt, symbol=sym))
+                    syn_bid = min(p_lo, p_hi)
+                    syn_ask = max(p_lo, p_hi)
+                    if syn_bid > 0.0 and syn_ask >= syn_bid:
+                        eff_bid, eff_ask = syn_bid, syn_ask
+                        is_delayed = True
+                except ValueError:
+                    eff_bid, eff_ask, is_delayed = 0.0, 0.0, False
+
+            eff_last = (
+                raw_last
+                if raw_last > 0.0
+                else (
+                    0.5 * (eff_bid + eff_ask) if (eff_bid > 0.0 and eff_ask >= eff_bid) else 0.0
+                )
+            )
             out[sym] = Quote(
                 symbol=sym,
-                bid=bid,
-                ask=ask,
-                last=last,
+                bid=eff_bid,
+                ask=eff_ask,
+                last=eff_last,
                 prev_close=prev_c,
                 timestamp_utc=now_iso,
+                is_delayed=is_delayed,
             )
         return out
 
@@ -420,11 +466,12 @@ class IbAsyncBrokerAdapter:
         if not tks:
             return default
         tk = tks[0]
-        bid = _safe_pos_float(tk.bid)
-        ask = _safe_pos_float(tk.ask)
+        bid = _safe_pos_float(tk.bid) or _safe_pos_float(getattr(tk, "delayedBid", 0.0))
+        ask = _safe_pos_float(tk.ask) or _safe_pos_float(getattr(tk, "delayedAsk", 0.0))
         if bid > 0 and ask >= bid:
             return 0.5 * (bid + ask)
-        return _safe_pos_float(tk.close, fallback=default)
+        prev_c = _safe_pos_float(tk.close) or _safe_pos_float(getattr(tk, "delayedClose", 0.0))
+        return prev_c if prev_c > 0 else default
 
     @staticmethod
     def _trade_to_report(

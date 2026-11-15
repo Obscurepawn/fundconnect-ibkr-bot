@@ -30,3 +30,7 @@
 - **Before / after TLC summary**:
   - Pre-fix (`L3_CrashRetryIdempotency.tla`): violated `NoDoubleOrderAcrossClientIds` (`41` states), `NoStrandedUnfilledTargetOnRetry` (`347` distinct states), `NoScaledBuyPermanentUnderfill` (`351` distinct states), and `NoDuplicateFxConversionOnRetry` (`225` distinct states).
   - Post-fix (`L3_CrashRetryIdempotency_v2.tla`): **PASS** (`0` violations across all 5 invariants; `2,452` distinct / `3,012` generated states in `_v2.cfg`, `3,678` distinct / `4,518` generated states in `_v2_scale.cfg`, `18/18` actions covered with `0` dead actions across all 8 cfgs).
+
+## Delayed-Quote Mode Sync (`2026-11-16` — `L3_CrashRetryIdempotency_v2`)
+- **Drift check**: `get_open_orders` (`src/fundconnect_bot/execution/broker.py:343-393`), `FILLED`-only checkpointing (`src/fundconnect_bot/execution/policy.py:1194-1207, 1370-1383`), `:cap:{orig}:{scaled}` intent derivation (`policy.py:1059-1068`), and pre-Phase-B FX checkpointing (`policy.py:1218-1301`) are all semantically unchanged; only line numbers shifted due to `load_env_file_defaults()` in `cli.py` and delayed-quote support in `broker.py`/`policy.py`.
+- **Re-anchoring & TLC verification**: Updated shifted source line anchors in `L3_CrashRetryIdempotency_v2.tla` + `anchors.lock` (`0` drift) and re-verified `_v2.cfg` (`2,452` distinct / `3,012` generated states) and `_v2_scale.cfg` (`3,678` distinct / `4,518` generated states) with `18/18` actions covered across all 8 cfgs (`0` violations).

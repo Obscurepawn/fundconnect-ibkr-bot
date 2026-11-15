@@ -1,8 +1,8 @@
 [Unit]
-Description=Weekly HKEX 09:32 HKT Timer for FundConnect Execution (Auto Holiday Deferral)
+Description=Weekly HKEX 09:48 HKT Timer for FundConnect Execution (Auto Holiday Deferral & 15m Delayed-Quote Ready)
 
 [Timer]
-OnCalendar=Mon,Tue,Wed *-*-* 09:32:00 Asia/Hong_Kong
+OnCalendar=Mon,Tue,Wed *-*-* 09:48:00 Asia/Hong_Kong
 Persistent=false
 AccuracySec=5s
 

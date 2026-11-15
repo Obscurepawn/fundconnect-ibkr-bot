@@ -2,53 +2,53 @@
 EXTENDS Integers, FiniteSets, TLC
 
 \* ============================ var <-> code map ============================
-\* CONSTANTS (read from src/fundconnect_bot/config.py:213-248 & cli.py:480-520)
-\*   Scenarios          - one-way USD->HKD cash/settlement scenarios (src/fundconnect_bot/cli.py:480-520, LESSONS.md R6)
-\*   RequireSettledHkd  - config.require_settled_hkd (TRUE)      (src/fundconnect_bot/config.py:246)
-\*   LotUnitCost        - per-lot worst-case buy outlay + fee    (src/fundconnect_bot/execution/policy.py:909-927)
+\* CONSTANTS (read from src/fundconnect_bot/config.py:213-253 & src/fundconnect_bot/cli.py:530-575)
+\*   Scenarios          - one-way USD->HKD cash/settlement scenarios (src/fundconnect_bot/cli.py:530-575, LESSONS.md R6)
+\*   RequireSettledHkd  - config.require_settled_hkd (TRUE)      (src/fundconnect_bot/config.py:251)
+\*   LotUnitCost        - per-lot worst-case buy outlay + fee    (src/fundconnect_bot/execution/policy.py:960-981)
 \*
 \* VARIABLES
-\*   scenario           - active scenario identifier             (src/fundconnect_bot/execution/policy.py:1066)
+\*   scenario           - active scenario identifier             (src/fundconnect_bot/execution/policy.py:1120)
 \*                        DENOTES: immutable initial portfolio/settlement setup
-\*   market             - market parameter ("US" or "HK")        (src/fundconnect_bot/execution/policy.py:1070)
+\*   market             - market parameter ("US" or "HK")        (src/fundconnect_bot/execution/policy.py:1124)
 \*                        DENOTES: target sleeve currency/settlement regime
-\*   step               - control cursor in execute_market_rebalance (src/fundconnect_bot/execution/policy.py:1098-1340)
+\*   step               - control cursor in execute_market_rebalance (src/fundconnect_bot/execution/policy.py:1152-1394)
 \*                        DENOTES: {"PHASE_A","POST_SELL_CASH","FX_STEP","COMPUTE_CAP","PHASE_B","SETTLEMENT"}
-\*   day                - clearing calendar day in 0..3          (src/fundconnect_bot/execution/broker.py:556-561)
+\*   day                - clearing calendar day in 0..3          (src/fundconnect_bot/execution/broker.py:603-608)
 \*                        DENOTES: T+0 execution session followed by T+1, T+2, T+3 settlement days
-\*   settled_cash       - IBKR SettledCash tag per currency      (src/fundconnect_bot/execution/broker.py:315-316, 326)
+\*   settled_cash       - IBKR SettledCash tag per currency      (src/fundconnect_bot/execution/broker.py:319-320, 330)
 \*                        DENOTES: cleared cash balance (negative => overnight margin loan accruing interest)
-\*   pending_settle     - unsettled clearing pipeline [ccy][d]   (src/fundconnect_bot/execution/broker.py:311-312)
+\*   pending_settle     - unsettled clearing pipeline [ccy][d]   (src/fundconnect_bot/execution/broker.py:315-318)
 \*                        DENOTES: net cash delta settling on day d \in {1, 2}
-\*   margin_bonus_usd   - Margin AvailableFunds collateral in USD(src/fundconnect_bot/execution/broker.py:317-318, 329-330)
+\*   margin_bonus_usd   - Margin AvailableFunds collateral in USD(src/fundconnect_bot/execution/broker.py:321-322, 333-334)
 \*                        DENOTES: excess margin purchasing power above USD CashBalance
-\*   pre_cash_snap      - `cash` snapshot at entry               (src/fundconnect_bot/execution/policy.py:1098, 1204, 1275)
+\*   pre_cash_snap      - `cash` snapshot at entry               (src/fundconnect_bot/execution/policy.py:1152, 1258, 1329)
 \*                        DENOTES: pre-Phase-A CashSnap for active market currency
-\*   after_sells_snap   - `after_sells_c` snapshot               (src/fundconnect_bot/execution/policy.py:1157)
+\*   after_sells_snap   - `after_sells_c` snapshot               (src/fundconnect_bot/execution/policy.py:1211)
 \*                        DENOTES: post-Phase-A CashSnap before FX conversion
-\*   phase_a_req        - planned Phase A sell proceeds          (src/fundconnect_bot/execution/policy.py:1132)
+\*   phase_a_req        - planned Phase A sell proceeds          (src/fundconnect_bot/execution/policy.py:1186)
 \*                        DENOTES: fee-adjusted net proceeds if Phase A sells fill
-\*   realized_sell_net  - _realized_sell_net_proceeds            (src/fundconnect_bot/execution/policy.py:930-951, 1205, 1276)
+\*   realized_sell_net  - _realized_sell_net_proceeds            (src/fundconnect_bot/execution/policy.py:984-1005, 1259, 1330)
 \*                        DENOTES: realized same-session Phase A sell net proceeds
-\*   phase_b_req        - uncapped total_required for Phase B    (src/fundconnect_bot/execution/policy.py:986)
+\*   phase_b_req        - uncapped total_required for Phase B    (src/fundconnect_bot/execution/policy.py:1040)
 \*                        DENOTES: sum of OrderSpec quantity * _unit_cost_with_fee
-\*   bootstrap_fx_req   - bootstrap_fx_usd CLI parameter         (src/fundconnect_bot/execution/policy.py:1073, 1163)
+\*   bootstrap_fx_req   - bootstrap_fx_usd CLI parameter         (src/fundconnect_bot/execution/policy.py:1127, 1217)
 \*                        DENOTES: USD amount requested for HK sleeve FX conversion
-\*   allow_fx_convert   - allow_fx_convert CLI parameter         (src/fundconnect_bot/execution/policy.py:1074, 1203)
+\*   allow_fx_convert   - allow_fx_convert CLI parameter         (src/fundconnect_bot/execution/policy.py:1128, 1257)
 \*                        DENOTES: whether live USD.HKD order is requested
-\*   fx_submitted       - whether convert_usd_to_hkd placed order(src/fundconnect_bot/execution/policy.py:1221)
+\*   fx_submitted       - whether convert_usd_to_hkd placed order(src/fundconnect_bot/execution/policy.py:1275)
 \*                        DENOTES: TRUE iff live Forex("USDHKD", exchange="FXCONV") order transmitted
-\*   fx_executed        - fx_executed_this_run flag              (src/fundconnect_bot/execution/policy.py:1161, 1226, 1283)
+\*   fx_executed        - fx_executed_this_run flag              (src/fundconnect_bot/execution/policy.py:1215, 1280, 1337)
 \*                        DENOTES: TRUE iff live FX order was accepted (not INACTIVE/CANCELLED)
-\*   fx_exchange        - fx_contract.exchange used on FX order  (src/fundconnect_bot/execution/broker.py:575)
+\*   fx_exchange        - fx_contract.exchange used on FX order  (src/fundconnect_bot/execution/broker.py:622)
 \*                        DENOTES: "NONE" | "IDEALPRO" | "FXCONV"
-\*   virtual_fx_open    - TWS FX Portfolio virtual position flag (src/fundconnect_bot/execution/broker.py:575-577)
+\*   virtual_fx_open    - TWS FX Portfolio virtual position flag (src/fundconnect_bot/execution/broker.py:622-624)
 \*                        DENOTES: TRUE iff USD.HKD trade routed to IDEALPRO instead of FXCONV
-\*   reserve_usd        - unspent USD reserved from Phase B      (src/fundconnect_bot/execution/policy.py:1162, 1214, 1224, 1249)
+\*   reserve_usd        - unspent USD reserved from Phase B      (src/fundconnect_bot/execution/policy.py:1216, 1268, 1278, 1303)
 \*                        DENOTES: reserve_amount passed to compute_spendable_cash
-\*   spendable_cash     - spendable returned before Phase B cap  (src/fundconnect_bot/execution/policy.py:1298)
+\*   spendable_cash     - spendable returned before Phase B cap  (src/fundconnect_bot/execution/policy.py:1352)
 \*                        DENOTES: non-borrowed cash cap passed to apply_cash_cap_to_buys
-\*   capped_buy_outlay  - total outlay of capped_buys            (src/fundconnect_bot/execution/policy.py:1300-1304)
+\*   capped_buy_outlay  - total outlay of capped_buys            (src/fundconnect_bot/execution/policy.py:1354-1358)
 \*                        DENOTES: actual Phase B buy outlay after apply_cash_cap_to_buys
 \* =========================================================================
 
@@ -102,21 +102,21 @@ UnsettledAfter(p_map, c, cur_day) ==
     (IF 1 > cur_day THEN p_map[c][1] ELSE 0)
     + (IF 2 > cur_day THEN p_map[c][2] ELSE 0)
 
-\* Exact transcription of IbAsyncBrokerAdapter.get_cash (src/fundconnect_bot/execution/broker.py:283-337)
+\* Exact transcription of IbAsyncBrokerAdapter.get_cash (src/fundconnect_bot/execution/broker.py:287-341)
 BrokerCashSnap(s_cash, p_map, m_bonus, cur_day, c) ==
     LET total   == s_cash[c] + UnsettledAfter(p_map, c, cur_day)
         settled == s_cash[c]
         avail   == IF c = "USD" THEN total + m_bonus ELSE total
     IN [total |-> total, settled |-> settled, avail |-> avail]
 
-\* Exact transcription of compute_spendable_cash (src/fundconnect_bot/execution/policy.py:954-965)
+\* Exact transcription of compute_spendable_cash (src/fundconnect_bot/execution/policy.py:1008-1019)
 ComputeSpendable(c, snap, res_amt) ==
     LET base == IF c = "HKD" /\ RequireSettledHkd
                 THEN Min3(snap.total, snap.settled, snap.avail)
                 ELSE Min2(snap.total, snap.avail)
     IN Max2(0, base - Max2(0, res_amt))
 
-\* Exact transcription of apply_cash_cap_to_buys (src/fundconnect_bot/execution/policy.py:968-1017)
+\* Exact transcription of apply_cash_cap_to_buys (src/fundconnect_bot/execution/policy.py:1022-1071)
 CapBuysOutlay(req_outlay, spendable) ==
     IF req_outlay <= 0 \/ spendable <= 0 THEN 0
     ELSE IF req_outlay <= spendable THEN req_outlay
@@ -124,7 +124,7 @@ CapBuysOutlay(req_outlay, spendable) ==
 
 ZeroSnap == [total |-> 0, settled |-> 0, avail |-> 0]
 
-\* Non-borrowed USD check before FX conversion (src/fundconnect_bot/execution/policy.py:1204-1213)
+\* Non-borrowed USD check before FX conversion (src/fundconnect_bot/execution/policy.py:1258-1267)
 NonBorrowedUsd(pre_snap, after_snap, real_sell) ==
     LET pre_fx_total == Max2(after_snap.total, pre_snap.total + real_sell)
         pre_fx_avail == Max2(after_snap.avail, pre_snap.avail + real_sell)
@@ -209,11 +209,11 @@ Init ==
     /\ spendable_cash    = 0
     /\ capped_buy_outlay = 0
 
-\* ---- Step 1: Phase A sells (src/fundconnect_bot/execution/policy.py:1132-1153) ----
+\* ---- Step 1: Phase A sells (src/fundconnect_bot/execution/policy.py:1186-1207) ----
 
 ExecPhaseASellFilled ==
     \* Phase A sells fill in-session and schedule proceeds on EquitySettleDay(market)
-    \* (src/fundconnect_bot/execution/policy.py:1132-1142, 930-951)
+    \* (src/fundconnect_bot/execution/policy.py:1186-1196, 984-1005)
     /\ step = "PHASE_A"
     /\ phase_a_req > 0
     /\ LET ccy == MarketCcy(market)
@@ -225,13 +225,13 @@ ExecPhaseASellFilled ==
 
 ExecPhaseASellUnfilled ==
     \* Either no Phase A sells exist, or Phase A limit order stays WORKING after walk steps
-    \* (src/fundconnect_bot/execution/policy.py:1036-1063, 1132-1153)
+    \* (src/fundconnect_bot/execution/policy.py:1090-1117, 1186-1207)
     /\ step = "PHASE_A"
     /\ realized_sell_net' = 0
     /\ step'              = "POST_SELL_CASH"
     /\ UNCHANGED <<scenario, market, day, settled_cash, pending_settle, margin_bonus_usd, pre_cash_snap, after_sells_snap, phase_a_req, phase_b_req, bootstrap_fx_req, allow_fx_convert, fx_submitted, fx_executed, fx_exchange, virtual_fx_open, reserve_usd, spendable_cash, capped_buy_outlay>>
 
-\* ---- Step 2: Refresh cash after Phase A sells (src/fundconnect_bot/execution/policy.py:1156-1157) ----
+\* ---- Step 2: Refresh cash after Phase A sells (src/fundconnect_bot/execution/policy.py:1210-1211) ----
 
 RefreshCashAfterSells ==
     /\ step = "POST_SELL_CASH"
@@ -240,11 +240,11 @@ RefreshCashAfterSells ==
        /\ step'             = "FX_STEP"
        /\ UNCHANGED <<scenario, market, day, settled_cash, pending_settle, margin_bonus_usd, pre_cash_snap, phase_a_req, realized_sell_net, phase_b_req, bootstrap_fx_req, allow_fx_convert, fx_submitted, fx_executed, fx_exchange, virtual_fx_open, reserve_usd, spendable_cash, capped_buy_outlay>>
 
-\* ---- Step 3: Optional bootstrap USD.HKD FX conversion (src/fundconnect_bot/execution/policy.py:1160-1253) ----
+\* ---- Step 3: Optional bootstrap USD.HKD FX conversion (src/fundconnect_bot/execution/policy.py:1214-1307) ----
 
 ExecBootstrapFx ==
-    \* Fix L2-A & L2-B2: requires non_borrowed_usd >= bootstrap_fx_usd (policy.py:1204-1220) and routes
-    \* Forex("USDHKD", exchange="FXCONV") so virtual_fx_open = FALSE (broker.py:575-599, policy.py:1221-1247).
+    \* Fix L2-A & L2-B2: requires non_borrowed_usd >= bootstrap_fx_usd (src/fundconnect_bot/execution/policy.py:1258-1274) and routes
+    \* Forex("USDHKD", exchange="FXCONV") so virtual_fx_open = FALSE (src/fundconnect_bot/execution/broker.py:622-646, src/fundconnect_bot/execution/policy.py:1275-1301).
     /\ step = "FX_STEP"
     /\ market = "US"
     /\ bootstrap_fx_req > 0
@@ -262,7 +262,7 @@ ExecBootstrapFx ==
     /\ UNCHANGED <<scenario, market, day, settled_cash, margin_bonus_usd, pre_cash_snap, after_sells_snap, phase_a_req, realized_sell_net, phase_b_req, bootstrap_fx_req, allow_fx_convert, spendable_cash, capped_buy_outlay>>
 
 ExecBootstrapFxRejected ==
-    \* If FXCONV order returns INACTIVE/CANCELLED/APICANCELLED, policy.py:1223-1224 keeps
+    \* If FXCONV order returns INACTIVE/CANCELLED/APICANCELLED, src/fundconnect_bot/execution/policy.py:1277-1278 keeps
     \* fx_executed_this_run = False and reserves bootstrap_fx_usd unspent from Phase B buys.
     /\ step = "FX_STEP"
     /\ market = "US"
@@ -279,7 +279,7 @@ ExecBootstrapFxRejected ==
 
 GuardBootstrapFxZeroMargin ==
     \* Fix L2-B2: when Phase A SGOV.US stays WORKING so non_borrowed_usd < bootstrap_fx_usd despite
-    \* Margin AvailableFunds > 0, policy.py:1213-1219 emits [ZERO_MARGIN_FX_GUARD], skips FX, and sets reserve_usd.
+    \* Margin AvailableFunds > 0, src/fundconnect_bot/execution/policy.py:1267-1273 emits [ZERO_MARGIN_FX_GUARD], skips FX, and sets reserve_usd.
     /\ step = "FX_STEP"
     /\ market = "US"
     /\ bootstrap_fx_req > 0
@@ -292,14 +292,14 @@ GuardBootstrapFxZeroMargin ==
 SkipOrReserveFx ==
     \* No live FX requested (`market = "HK"`, `bootstrap_fx_usd == 0`, or `~allow_fx_convert`):
     \* reserves bootstrap_fx_usd when `market == "US" /\ bootstrap_fx_usd > 0 /\ ~allow_fx_convert`
-    \* (src/fundconnect_bot/execution/policy.py:1163, 1248-1253).
+    \* (src/fundconnect_bot/execution/policy.py:1217, 1302-1307).
     /\ step = "FX_STEP"
     /\ ~(market = "US" /\ bootstrap_fx_req > 0 /\ allow_fx_convert = TRUE)
     /\ reserve_usd' = IF market = "US" /\ bootstrap_fx_req > 0 /\ ~allow_fx_convert THEN bootstrap_fx_req ELSE 0
     /\ step'        = "COMPUTE_CAP"
     /\ UNCHANGED <<scenario, market, day, settled_cash, pending_settle, margin_bonus_usd, pre_cash_snap, after_sells_snap, phase_a_req, realized_sell_net, phase_b_req, bootstrap_fx_req, allow_fx_convert, fx_submitted, fx_executed, fx_exchange, virtual_fx_open, spendable_cash, capped_buy_outlay>>
 
-\* ---- Step 4: Construct eff_cash, compute_spendable_cash & apply_cash_cap_to_buys (src/fundconnect_bot/execution/policy.py:1273-1305) ----
+\* ---- Step 4: Construct eff_cash, compute_spendable_cash & apply_cash_cap_to_buys (src/fundconnect_bot/execution/policy.py:1327-1359) ----
 
 ComputeSpendableAndCapBuys ==
     /\ step = "COMPUTE_CAP"
@@ -325,7 +325,7 @@ ComputeSpendableAndCapBuys ==
           /\ step'              = "PHASE_B"
           /\ UNCHANGED <<scenario, market, day, settled_cash, pending_settle, margin_bonus_usd, pre_cash_snap, after_sells_snap, phase_a_req, realized_sell_net, phase_b_req, bootstrap_fx_req, allow_fx_convert, fx_submitted, fx_executed, fx_exchange, virtual_fx_open, reserve_usd>>
 
-\* ---- Step 5: Execute capped Phase B buys (src/fundconnect_bot/execution/policy.py:1308-1329) ----
+\* ---- Step 5: Execute capped Phase B buys (src/fundconnect_bot/execution/policy.py:1362-1383) ----
 
 ExecPhaseBBuys ==
     /\ step = "PHASE_B"
@@ -340,7 +340,7 @@ ExecPhaseBBuys ==
 \* ---- Step 6: Multi-day clearing house progression T+0 -> T+1 -> T+2 -> T+3 ----
 
 AdvanceSettlementDay ==
-    \* Credits/debits clearing obligations maturing on day + 1 into SettledCash (src/fundconnect_bot/execution/broker.py:556-561)
+    \* Credits/debits clearing obligations maturing on day + 1 into SettledCash (src/fundconnect_bot/execution/broker.py:603-608)
     /\ step = "SETTLEMENT"
     /\ day < 3
     /\ LET nxt == day + 1 IN

@@ -32,3 +32,7 @@
 - **Before / after TLC summary**:
   - Pre-fix (`L2_TwoPhaseCashSettlement.tla`): violated `NoUnintendedVirtualFxPosition` (`6` distinct states, depth `4`) and `ZeroMarginLoanSettledCash` on `MONDAY_BOOTSTRAP_FX` (`15` distinct states, depth `8`).
   - Post-fix (`L2_TwoPhaseCashSettlement_v2.tla`): **PASS** (`0` violations across all 4 invariants; `49` distinct / `55` generated states in `_v2.cfg`, `81` distinct / `91` generated states in `_v2_scale.cfg`, `12/12` actions covered with `0` dead actions).
+
+## Delayed-Quote Mode Sync (`2026-11-16` — `L2_TwoPhaseCashSettlement_v2`)
+- **Drift check**: `_unit_cost_with_fee` (`src/fundconnect_bot/execution/policy.py:960-981`) reserves `delayed_max_slippage_bps` (`60.0 bps` vs live `25.0 bps`) when `spec.delayed_quote` is `True`, preserving the exact worst-case `LotUnitCost` upper-bound invariant required by `apply_cash_cap_to_buys` (`policy.py:1022-1071`). All cash-refresh, `FXCONV` physical conversion (`broker.py:622`), `[ZERO_MARGIN_FX_GUARD]` (`policy.py:1258-1273`), and `compute_spendable_cash` (`policy.py:1008-1019`) semantics are unchanged.
+- **Re-anchoring & TLC verification**: Updated shifted source line anchors in `L2_TwoPhaseCashSettlement_v2.tla` + `anchors.lock` (`0` drift) and re-verified `_v2.cfg` (`49` distinct / `55` generated states) and `_v2_scale.cfg` (`81` distinct / `91` generated states) with `12/12` actions covered (`0` violations).
