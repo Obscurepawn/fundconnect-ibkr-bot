@@ -8,12 +8,12 @@ EXTENDS Integers, FiniteSets, TLC
 \*   ReqQty            - spec.quantity (200 shares)            (src/fundconnect_bot/execution/policy.py:580)
 \*   LotSize           - spec.lot_size (100 shares)            (src/fundconnect_bot/execution/policy.py:581)
 \*   MaxWalkSteps      - config.max_walk_steps (3)             (src/fundconnect_bot/config.py:238)
-\*   LiveQuoteSet      - live/delayed quote regimes in walk    (src/fundconnect_bot/execution/broker.py:395-459)
+\*   LiveQuoteSet      - live/delayed quote regimes in walk    (src/fundconnect_bot/execution/broker.py:424-488)
 \*
 \* VARIABLES
 \*   pc                - control point in _execute_orders_with_walk / broker (src/fundconnect_bot/execution/policy.py:1083-1117)
 \*                       DENOTES: {"IDLE","PLACE_SLEEP","POLL_SLEEP","QUOTE_FETCH","CALL_MODIFY","MOD_WIRE_SLEEP","DONE"}
-\*   caller_mode       - {"WALK_LOOP", "DIRECT_MODIFY"}        (src/fundconnect_bot/execution/policy.py:1074, src/fundconnect_bot/execution/broker.py:528)
+\*   caller_mode       - {"WALK_LOOP", "DIRECT_MODIFY"}        (src/fundconnect_bot/execution/policy.py:1074, src/fundconnect_bot/execution/broker.py:557)
 \*                       DENOTES: _execute_orders_with_walk vs direct BrokerAdapter.modify_order_limit caller
 \*   side              - spec.side ("BUY" or "SELL")           (src/fundconnect_bot/execution/policy.py:579)
 \*                       DENOTES: immutable order direction for this execution
@@ -29,25 +29,25 @@ EXTENDS Integers, FiniteSets, TLC
 \*                       DENOTES: limit price tracked on Python OrderSpec
 \*   pending_lmt       - new_limit_price passed to modify      (src/fundconnect_bot/execution/policy.py:1104, 1112)
 \*                       DENOTES: candidate walk limit (0 when None)
-\*   prev_lmt_px       - prev_lmt snapshot in modify_order_limit (src/fundconnect_bot/execution/broker.py:541)
-\*                       DENOTES: saved trade.order.lmtPrice restored on Error 104 (src/fundconnect_bot/execution/broker.py:573)
-\*   trade_lmt_px      - trade.order.lmtPrice in ib_async      (src/fundconnect_bot/execution/broker.py:499, 560, 573)
+\*   prev_lmt_px       - prev_lmt snapshot in modify_order_limit (src/fundconnect_bot/execution/broker.py:570)
+\*                       DENOTES: saved trade.order.lmtPrice restored on Error 104 (src/fundconnect_bot/execution/broker.py:602)
+\*   trade_lmt_px      - trade.order.lmtPrice in ib_async      (src/fundconnect_bot/execution/broker.py:528, 589, 602)
 \*                       DENOTES: client-side Trade.order.lmtPrice
-\*   venue_lmt_px      - active/executed limit price at IBKR   (src/fundconnect_bot/execution/broker.py:522, 561)
+\*   venue_lmt_px      - active/executed limit price at IBKR   (src/fundconnect_bot/execution/broker.py:551, 590)
 \*                       DENOTES: authoritative broker/exchange order limit price
-\*   submitted_oids    - set of TWS orderIds transmitted       (src/fundconnect_bot/execution/broker.py:522, 561)
+\*   submitted_oids    - set of TWS orderIds transmitted       (src/fundconnect_bot/execution/broker.py:551, 590)
 \*                       DENOTES: witness set for NoDuplicateOrderOnModify
-\*   sent_limits       - set of all limit prices sent to TWS   (src/fundconnect_bot/execution/broker.py:522, 561)
+\*   sent_limits       - set of all limit prices sent to TWS   (src/fundconnect_bot/execution/broker.py:551, 590)
 \*                       DENOTES: witness set for LimitNeverExceedsSlippageCeiling
-\*   tws_status        - trade.orderStatus.status in ib_async  (src/fundconnect_bot/execution/broker.py:482, 533)
+\*   tws_status        - trade.orderStatus.status in ib_async  (src/fundconnect_bot/execution/broker.py:511, 562)
 \*                       DENOTES: {"NONE","PendingSubmit","PreSubmitted","Submitted","Filled","Inactive","ApiCancelled"}
-\*   tws_filled        - trade.orderStatus.filled shares       (src/fundconnect_bot/execution/broker.py:480, 534)
+\*   tws_filled        - trade.orderStatus.filled shares       (src/fundconnect_bot/execution/broker.py:509, 563)
 \*                       DENOTES: cumulative executed shares delivered via execDetails/orderStatus
-\*   reprice_cnt       - _trades_by_id[order_id][2] counter    (src/fundconnect_bot/execution/broker.py:525, 574, 578-579)
+\*   reprice_cnt       - _trades_by_id[order_id][2] counter    (src/fundconnect_bot/execution/broker.py:554, 603, 607-608)
 \*                       DENOTES: count of venue-accepted modify_order_limit calls
-\*   last_tws_error    - saw_err_104 / TWS error code (0/104/110) (src/fundconnect_bot/execution/broker.py:543-572)
+\*   last_tws_error    - saw_err_104 / TWS error code (0/104/110) (src/fundconnect_bot/execution/broker.py:572-601)
 \*                       DENOTES: broker error code observed during current call
-\*   mod_wire_resolved - whether in-flight modify settled      (src/fundconnect_bot/execution/broker.py:561-562)
+\*   mod_wire_resolved - whether in-flight modify settled      (src/fundconnect_bot/execution/broker.py:590-591)
 \*                       DENOTES: wire synchronization flag during ib.sleep(0.5) in modify_order_limit
 \*   rep_snapshot      - local variable `rep` in walk loop     (src/fundconnect_bot/execution/policy.py:1084, 1096, 1100, 1112)
 \*                       DENOTES: most recent FillReport held by _execute_orders_with_walk
@@ -97,10 +97,10 @@ DoneStates == {"Filled", "Inactive", "ApiCancelled"}
 ActiveStates == {"PendingSubmit", "PreSubmitted", "Submitted"}
 
 \* Windows where ib_async runs its asyncio socket loop and processes TWS callbacks:
-\*   PLACE_SLEEP    : src/fundconnect_bot/execution/broker.py:523 (ib.sleep(0.5) inside place_order)
-\*   POLL_SLEEP     : src/fundconnect_bot/execution/broker.py:584-585 (ib.sleep(wait_sec) inside poll_order)
-\*   QUOTE_FETCH    : src/fundconnect_bot/execution/broker.py:400-401 (ib.qualifyContracts / ib.reqTickers inside get_quotes)
-\*   MOD_WIRE_SLEEP : src/fundconnect_bot/execution/broker.py:562 (ib.sleep(0.5) inside modify_order_limit)
+\*   PLACE_SLEEP    : src/fundconnect_bot/execution/broker.py:552 (ib.sleep(0.5) inside place_order)
+\*   POLL_SLEEP     : src/fundconnect_bot/execution/broker.py:613-614 (ib.sleep(wait_sec) inside poll_order)
+\*   QUOTE_FETCH    : src/fundconnect_bot/execution/broker.py:429-430 (ib.qualifyContracts / ib.reqTickers inside get_quotes)
+\*   MOD_WIRE_SLEEP : src/fundconnect_bot/execution/broker.py:591 (ib.sleep(0.5) inside modify_order_limit)
 AsyncPumpWindows == {"PLACE_SLEEP", "POLL_SLEEP", "QUOTE_FETCH"}
 
 CeilDiv(a, b) == (a + b - 1) \div b
@@ -135,7 +135,7 @@ HardSlippageBound(s, is_delayed) ==
 DirectTargetLimit(s, tstep, is_delayed) ==
     RoundToTick(HardSlippageBound(s, is_delayed), s, tstep)
 
-\* _trade_to_report transcription (src/fundconnect_bot/execution/broker.py:477-502)
+\* _trade_to_report transcription (src/fundconnect_bot/execution/broker.py:506-531)
 TradeToReport(t_status, t_filled, t_lmt, r_cnt) ==
     LET st == IF t_filled >= ReqQty \/ t_status = "Filled" THEN "FILLED"
               ELSE IF t_status \in {"Inactive", "ApiCancelled"} THEN "CANCELLED"
@@ -222,7 +222,7 @@ Init ==
 \* ---- Bot transitions (src/fundconnect_bot/execution/broker.py & src/fundconnect_bot/execution/policy.py) ----
 
 BotPlaceOrder ==
-    \* place_order: ib.placeOrder + enter ib.sleep(0.5) (src/fundconnect_bot/execution/broker.py:504-523)
+    \* place_order: ib.placeOrder + enter ib.sleep(0.5) (src/fundconnect_bot/execution/broker.py:533-552)
     /\ pc = "IDLE"
     /\ LET init_px == cur_spec_lmt IN
        /\ trade_lmt_px'   = init_px
@@ -235,7 +235,7 @@ BotPlaceOrder ==
        /\ UNCHANGED <<caller_mode, side, delayed_quote, tick_step, all_tight_quotes, walk_step, cur_spec_lmt, pending_lmt, tws_filled, reprice_cnt, last_tws_error, mod_wire_resolved, rep_snapshot, final_report>>
 
 BotFinishPlace ==
-    \* place_order return + initial terminal check (src/fundconnect_bot/execution/broker.py:524-526, src/fundconnect_bot/execution/policy.py:1084-1090)
+    \* place_order return + initial terminal check (src/fundconnect_bot/execution/broker.py:553-555, src/fundconnect_bot/execution/policy.py:1084-1090)
     /\ pc = "PLACE_SLEEP"
     /\ LET rep == TradeToReport(tws_status, tws_filled, trade_lmt_px, 0) IN
        /\ rep_snapshot' = rep
@@ -250,7 +250,7 @@ BotFinishPlace ==
 
 BotFinishPoll ==
     \* poll_order return: WALK_LOOP checks terminal status before get_quotes (src/fundconnect_bot/execution/policy.py:1091-1099);
-    \* DIRECT_MODIFY invokes modify_order_limit directly to exercise src/fundconnect_bot/execution/broker.py:533-539 DoneStates guard.
+    \* DIRECT_MODIFY invokes modify_order_limit directly to exercise src/fundconnect_bot/execution/broker.py:562-568 DoneStates guard.
     /\ pc = "POLL_SLEEP"
     /\ LET rep == TradeToReport(tws_status, tws_filled, trade_lmt_px, reprice_cnt) IN
        /\ rep_snapshot' = rep
@@ -324,7 +324,7 @@ BotWalkScheduleModify ==
 
 BotModifyShortCircuitDone ==
     \* Fix L1-A: modify_order_limit checks DoneStates or filled_now >= spec.quantity BEFORE mutating
-    \* trade.order.lmtPrice or calling ib.placeOrder (src/fundconnect_bot/execution/broker.py:533-539).
+    \* trade.order.lmtPrice or calling ib.placeOrder (src/fundconnect_bot/execution/broker.py:562-568).
     /\ pc = "CALL_MODIFY"
     /\ (tws_status \in DoneStates \/ tws_filled >= ReqQty)
     /\ LET rep == TradeToReport(tws_status, tws_filled, trade_lmt_px, reprice_cnt) IN
@@ -335,7 +335,7 @@ BotModifyShortCircuitDone ==
 
 BotModifyTransmit ==
     \* modify_order_limit snapshots prev_lmt, subscribes _on_error for Error 104, and transmits updated
-    \* lmtPrice on existing orderId=1 (src/fundconnect_bot/execution/broker.py:541-562).
+    \* lmtPrice on existing orderId=1 (src/fundconnect_bot/execution/broker.py:570-591).
     /\ pc = "CALL_MODIFY"
     /\ tws_status \in ActiveStates
     /\ tws_filled < ReqQty
@@ -350,7 +350,7 @@ BotModifyTransmit ==
 
 BotFinishModifyError104 ==
     \* Fix L1-C: on Error 104 ("Can't modify a filled order"), restore trade.order.lmtPrice = prev_lmt,
-    \* keep (prev_spec, prev_cnt), and return _trade_to_report (src/fundconnect_bot/execution/broker.py:567-575, src/fundconnect_bot/execution/policy.py:1112-1114).
+    \* keep (prev_spec, prev_cnt), and return _trade_to_report (src/fundconnect_bot/execution/broker.py:596-604, src/fundconnect_bot/execution/policy.py:1112-1114).
     /\ pc = "MOD_WIRE_SLEEP"
     /\ mod_wire_resolved = TRUE
     /\ last_tws_error = 104
@@ -363,7 +363,7 @@ BotFinishModifyError104 ==
 
 BotFinishModifySuccess ==
     \* Accepted modification updates updated_spec, increments cnt = prev_cnt + 1, and updates cur_spec
-    \* (src/fundconnect_bot/execution/broker.py:577-580, src/fundconnect_bot/execution/policy.py:1112-1116).
+    \* (src/fundconnect_bot/execution/broker.py:606-609, src/fundconnect_bot/execution/policy.py:1112-1116).
     /\ pc = "MOD_WIRE_SLEEP"
     /\ mod_wire_resolved = TRUE
     /\ last_tws_error /= 104
@@ -384,14 +384,14 @@ BotFinishModifySuccess ==
 \* ---- Asynchronous TWS / venue transitions during ib_async event-loop pumps ----
 
 TwsAckOrder ==
-    \* PendingSubmit -> PreSubmitted -> Submitted (src/fundconnect_bot/execution/broker.py:523, 585, 400-401)
+    \* PendingSubmit -> PreSubmitted -> Submitted (src/fundconnect_bot/execution/broker.py:552, 614, 429-430)
     /\ pc \in AsyncPumpWindows
     /\ tws_status \in {"PendingSubmit", "PreSubmitted"}
     /\ tws_status' = IF tws_status = "PendingSubmit" THEN "PreSubmitted" ELSE "Submitted"
     /\ UNCHANGED <<pc, caller_mode, side, delayed_quote, tick_step, all_tight_quotes, walk_step, cur_spec_lmt, pending_lmt, prev_lmt_px, trade_lmt_px, venue_lmt_px, submitted_oids, sent_limits, tws_filled, reprice_cnt, last_tws_error, mod_wire_resolved, rep_snapshot, final_report>>
 
 TwsRejectInactive ==
-    \* Error 110 (tick size) or Error 201 (margin/permission) -> Inactive (src/fundconnect_bot/execution/broker.py:485-486)
+    \* Error 110 (tick size) or Error 201 (margin/permission) -> Inactive (src/fundconnect_bot/execution/broker.py:514-515)
     /\ pc \in AsyncPumpWindows
     /\ tws_status \in ActiveStates
     /\ tws_filled = 0
@@ -400,7 +400,7 @@ TwsRejectInactive ==
     /\ UNCHANGED <<pc, caller_mode, side, delayed_quote, tick_step, all_tight_quotes, walk_step, cur_spec_lmt, pending_lmt, prev_lmt_px, trade_lmt_px, venue_lmt_px, submitted_oids, sent_limits, tws_filled, reprice_cnt, mod_wire_resolved, rep_snapshot, final_report>>
 
 TwsPartialFill ==
-    \* Partial venue execution (LotSize < ReqQty) delivered via execDetails + orderStatus (src/fundconnect_bot/execution/broker.py:480, 487-488)
+    \* Partial venue execution (LotSize < ReqQty) delivered via execDetails + orderStatus (src/fundconnect_bot/execution/broker.py:509, 516-517)
     /\ pc \in AsyncPumpWindows
     /\ tws_status \in {"PreSubmitted", "Submitted"}
     /\ tws_filled = 0
@@ -410,7 +410,7 @@ TwsPartialFill ==
     /\ UNCHANGED <<pc, caller_mode, side, delayed_quote, tick_step, all_tight_quotes, walk_step, cur_spec_lmt, pending_lmt, prev_lmt_px, trade_lmt_px, venue_lmt_px, submitted_oids, sent_limits, reprice_cnt, last_tws_error, mod_wire_resolved, rep_snapshot, final_report>>
 
 TwsFullFill ==
-    \* Full venue execution -> status = "Filled" (src/fundconnect_bot/execution/broker.py:483-484)
+    \* Full venue execution -> status = "Filled" (src/fundconnect_bot/execution/broker.py:512-513)
     /\ pc \in AsyncPumpWindows
     /\ tws_status \in {"PreSubmitted", "Submitted"}
     /\ tws_filled < ReqQty
@@ -419,14 +419,14 @@ TwsFullFill ==
     /\ UNCHANGED <<pc, caller_mode, side, delayed_quote, tick_step, all_tight_quotes, walk_step, cur_spec_lmt, pending_lmt, prev_lmt_px, trade_lmt_px, venue_lmt_px, submitted_oids, sent_limits, reprice_cnt, last_tws_error, mod_wire_resolved, rep_snapshot, final_report>>
 
 TwsAsyncCancel ==
-    \* Unsolicited TWS / supervisory cancel -> status = "ApiCancelled" (src/fundconnect_bot/execution/broker.py:485-486)
+    \* Unsolicited TWS / supervisory cancel -> status = "ApiCancelled" (src/fundconnect_bot/execution/broker.py:514-515)
     /\ pc \in AsyncPumpWindows
     /\ tws_status \in {"PreSubmitted", "Submitted"}
     /\ tws_status' = "ApiCancelled"
     /\ UNCHANGED <<pc, caller_mode, side, delayed_quote, tick_step, all_tight_quotes, walk_step, cur_spec_lmt, pending_lmt, prev_lmt_px, trade_lmt_px, venue_lmt_px, submitted_oids, sent_limits, tws_filled, reprice_cnt, last_tws_error, mod_wire_resolved, rep_snapshot, final_report>>
 
 TwsModifyAccepted ==
-    \* Venue accepts in-place orderId=1 limit modification (src/fundconnect_bot/execution/broker.py:561-562)
+    \* Venue accepts in-place orderId=1 limit modification (src/fundconnect_bot/execution/broker.py:590-591)
     /\ pc = "MOD_WIRE_SLEEP"
     /\ mod_wire_resolved = FALSE
     /\ venue_lmt_px'      = trade_lmt_px
@@ -436,7 +436,7 @@ TwsModifyAccepted ==
 
 TwsError104WireRace ==
     \* Server-side wire race: order matched in full at prior venue_lmt_px before modify arrived;
-    \* TWS emits Error 104 + orderStatus("Filled") while rejecting new limit on venue (src/fundconnect_bot/execution/broker.py:546-575)
+    \* TWS emits Error 104 + orderStatus("Filled") while rejecting new limit on venue (src/fundconnect_bot/execution/broker.py:575-604)
     /\ pc = "MOD_WIRE_SLEEP"
     /\ mod_wire_resolved = FALSE
     /\ tws_status \in {"PreSubmitted", "Submitted"}

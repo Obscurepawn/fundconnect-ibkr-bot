@@ -292,12 +292,14 @@ class IbAsyncBrokerAdapter:
                 "cash_balance": None,
                 "total_cash_balance": None,
                 "settled": None,
+                "settled_by_date": None,
                 "avail": None,
             },
             "HKD": {
                 "cash_balance": None,
                 "total_cash_balance": None,
                 "settled": None,
+                "settled_by_date": None,
                 "avail": None,
             },
         }
@@ -307,16 +309,42 @@ class IbAsyncBrokerAdapter:
                 continue
             ccy: CurrencyCode = "HKD" if ccy_str == "HKD" else "USD"
             tag = str(av.tag or "")
+            if tag in ("SettledCashByDate", "$LEDGER-SettledCashByDate"):
+                if by_ccy[ccy]["settled"] is None and (
+                    tag == "SettledCashByDate" or by_ccy[ccy]["settled_by_date"] is None
+                ):
+                    for raw_seg in str(av.value or "").split(";"):
+                        seg = raw_seg.strip()
+                        if not seg:
+                            continue
+                        _, sep, amt_str = seg.partition(":")
+                        if sep:
+                            try:
+                                parsed = float(amt_str)
+                            except ValueError:
+                                break
+                            if math.isfinite(parsed):
+                                by_ccy[ccy]["settled_by_date"] = parsed
+                        break
+                continue
             try:
                 val = float(av.value)
             except (TypeError, ValueError):
                 continue
+            if not math.isfinite(val):
+                continue
             # Never use TotalCashValue (IBKR's base-currency cross-currency aggregate)
-            if tag == "CashBalance":
+            if tag == "CashBalance" or (
+                tag == "$LEDGER-CashBalance" and by_ccy[ccy]["cash_balance"] is None
+            ):
                 by_ccy[ccy]["cash_balance"] = val
-            elif tag == "TotalCashBalance":
+            elif tag == "TotalCashBalance" or (
+                tag == "$LEDGER-TotalCashBalance" and by_ccy[ccy]["total_cash_balance"] is None
+            ):
                 by_ccy[ccy]["total_cash_balance"] = val
-            elif tag == "SettledCash":
+            elif tag == "SettledCash" or (
+                tag == "$LEDGER-SettledCash" and by_ccy[ccy]["settled"] is None
+            ):
                 by_ccy[ccy]["settled"] = val
             elif tag == "AvailableFunds":
                 by_ccy[ccy]["avail"] = val
@@ -327,7 +355,8 @@ class IbAsyncBrokerAdapter:
             tcb = m["total_cash_balance"]
             total = cb if cb is not None else (tcb if tcb is not None else 0.0)
             # Preserve explicit 0.0 (or negative) SettledCash rather than overwriting with unsettled total
-            settled = m["settled"] if m["settled"] is not None else total
+            settled_raw = m["settled"] if m["settled"] is not None else m["settled_by_date"]
+            settled = settled_raw if settled_raw is not None else total
             # IBKR emits AvailableFunds only in account Base Currency; compute_spendable_cash
             # separately enforces SettledCash on HKD when require_settled_hkd=True.
             avail_raw = m["avail"]
@@ -620,8 +649,13 @@ class IbAsyncBrokerAdapter:
             )
         ib_mod, ib = self._require_ib()
         fx_contract = ib_mod.Forex("USDHKD", exchange="FXCONV")
-        ib.qualifyContracts(fx_contract)
-        # Selling USD.HKD on FXCONV converts physical USD into HKD without creating a virtual FX position.
+        qualified = ib.qualifyContracts(fx_contract)
+        if qualified == [] and getattr(fx_contract, "conId", None) == 0:
+            # IB Gateway 10.3x+ USD-base accounts reject FXCONV with Error 200 (conId=0);
+            # fall back to IDEALPRO (get_positions() filters sec_type in ("", "STK")).
+            fx_contract = ib_mod.Forex("USDHKD")
+            ib.qualifyContracts(fx_contract)
+        # Selling USD.HKD converts USD into HKD (physical on FXCONV, or spot on IDEALPRO fallback).
         fx_order = ib_mod.LimitOrder(
             action="SELL",
             totalQuantity=round(usd_amount),

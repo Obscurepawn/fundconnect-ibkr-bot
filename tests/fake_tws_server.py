@@ -347,6 +347,8 @@ class FakeTwsServer:
         apply_fees: bool = True,
         has_live_equity_subscription: bool = True,
         delayed_quotes: Mapping[str, tuple[float, float, float, float]] | None = None,
+        reject_fxconv: bool = False,
+        emit_ledger_cash_tags: bool = False,
     ) -> None:
         self.account_id = account_id
         self.base_currency: CurrencyCode = base_currency
@@ -354,6 +356,8 @@ class FakeTwsServer:
         self.fill_mode: FillMode = fill_mode
         self.apply_fees = apply_fees
         self.has_live_equity_subscription: bool = has_live_equity_subscription
+        self.reject_fxconv: bool = reject_fxconv
+        self.emit_ledger_cash_tags: bool = emit_ledger_cash_tags
 
         self.current_day: int = 0
         self.clock_sec: float = 0.0
@@ -702,7 +706,12 @@ class FakeTwsServer:
             sym = str(getattr(contract, "symbol", "") or "").upper()
             ccy = str(getattr(contract, "currency", "") or "").upper()
             exch = str(getattr(contract, "exchange", "IDEALPRO") or "IDEALPRO").upper()
-            if (sym, ccy) != ("USD", "HKD") or exch not in ("IDEALPRO", "FXCONV"):
+            if (
+                (sym, ccy) != ("USD", "HKD")
+                or exch not in ("IDEALPRO", "FXCONV")
+                or (exch == "FXCONV" and self.reject_fxconv)
+            ):
+                contract.conId = 0
                 self._emit_error(
                     0, 200, f"Unknown CASH contract {sym}.{ccy}@{exch}", client_id
                 )
@@ -1096,6 +1105,50 @@ class FakeTwsServer:
             stock_mv_usd if self.base_currency == "USD" else stock_mv_usd * rate
         )
         avail_base = max(0.0, self._compute_net_liquidation_base() - init_margin_base)
+
+        if self.emit_ledger_cash_tags:
+            d0 = 20261116 + self.current_day
+            d1 = d0 + 1
+            return [
+                AccountValue("$LEDGER-CashBalance", f"{usd_cb:.6f}", "USD", account=self.account_id),
+                AccountValue(
+                    "$LEDGER-TotalCashBalance", f"{usd_cb:.6f}", "USD", account=self.account_id
+                ),
+                AccountValue(
+                    "SettledCashByDate",
+                    f"{d0}:{usd_sc:.8f};{d1}:{usd_cb:.8f}",
+                    "USD",
+                    account=self.account_id,
+                ),
+                AccountValue("$LEDGER-CashBalance", f"{hkd_cb:.6f}", "HKD", account=self.account_id),
+                AccountValue(
+                    "$LEDGER-TotalCashBalance", f"{hkd_cb:.6f}", "HKD", account=self.account_id
+                ),
+                AccountValue(
+                    "SettledCashByDate",
+                    f"{d0}:{hkd_sc:.8f};{d1}:{hkd_cb:.8f}",
+                    "HKD",
+                    account=self.account_id,
+                ),
+                AccountValue(
+                    "TotalCashValue",
+                    f"{total_cash_base:.2f}",
+                    self.base_currency,
+                    account=self.account_id,
+                ),
+                AccountValue(
+                    "AvailableFunds",
+                    f"{avail_base:.2f}",
+                    self.base_currency,
+                    account=self.account_id,
+                ),
+                AccountValue(
+                    "$LEDGER-CashBalance",
+                    f"{total_cash_base:.2f}",
+                    "BASE",
+                    account=self.account_id,
+                ),
+            ]
 
         return [
             AccountValue("CashBalance", f"{usd_cb:.2f}", "USD", account=self.account_id),

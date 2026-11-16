@@ -69,6 +69,22 @@ HK_CACHE_DIR = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ibkr_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent host `~/.config/fundconnect-bot/env` from leaking into mock E2E tests."""
+    for key in (
+        "IBKR_HOST",
+        "IBKR_PORT",
+        "IBKR_CLIENT_ID",
+        "IBKR_ACCOUNT",
+        "IBKR_MARKET_DATA_TYPE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    empty_cfg = tmp_path / "_isolated_xdg_cfg"
+    empty_cfg.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(empty_cfg))
+
+
 @pytest.fixture(scope="module")
 def plan_20261113() -> WeeklyPlan:
     return build_weekly_plan(
@@ -2031,6 +2047,51 @@ def test_e2e_cli_load_env_file_defaults_and_xdg_precedence(
     assert connected_calls == [("127.0.0.2", 4002, 31, "DU_XDG_777", 3)]
     assert "SHY.US" in server.holdings
     assert server.orders[0].account == "DU_XDG_777"
+
+
+def test_e2e_ib_gateway_103x_ledger_cash_tags_and_fxconv_idealpro_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real IB Gateway 10.3x+ USD-base Paper account emits `$LEDGER-*` + `SettledCashByDate`
+    and rejects `FXCONV` with Error 200 (`conId=0`), falling back cleanly to `IDEALPRO`.
+    """
+    server = FakeTwsServer(
+        account_id="DUP412000",
+        base_currency="USD",
+        usd_cash=321_799.75,
+        usd_settled_cash=-3_537.68,
+        hkd_cash=0.0,
+        hkd_settled_cash=0.0,
+        reject_fxconv=True,
+        emit_ledger_cash_tags=True,
+    )
+    server.set_position("SGOV.US", quantity=1000, avg_cost=100.10, market_price=100.12)
+    server.set_quote("SGOV.US", bid=100.11, ask=100.13, close=100.12)
+    _install_fake_ib(monkeypatch, server)
+
+    with IbAsyncBrokerAdapter(IbkrConnectionConfig(account="DUP412000")) as adapter:
+        cash_before = adapter.get_cash()
+        assert cash_before["USD"].total_cash == pytest.approx(321_799.75)
+        assert cash_before["USD"].settled_cash == pytest.approx(-3_537.68)
+        assert cash_before["HKD"].total_cash == pytest.approx(0.0)
+        assert cash_before["HKD"].settled_cash == pytest.approx(0.0)
+
+        fx_rep = adapter.convert_usd_to_hkd(300_000.0, dry_run=False)
+        assert fx_rep.status == "Filled"
+        assert fx_rep.sell_amount == 300_000
+        assert any(e.error_code == 200 and "FXCONV" in e.message for e in server.errors)
+        assert server.virtual_fx_usd_position == pytest.approx(-300_000.0)
+
+        # IDEALPRO virtual FX CASH position MUST NOT leak into stock positions!
+        pos = adapter.get_positions()
+        assert set(pos.keys()) == {"SGOV.US"}
+
+        # CashBalance(HKD) updated immediately while SettledCashByDate(HKD) stays 0.0 until T+2!
+        # Sold 300,000 USD at lmtPrice = round(7.8000 - 0.0005, 4) = 7.7995 -> 2,339,850.00 HKD.
+        cash_after = adapter.get_cash()
+        assert cash_after["HKD"].total_cash == pytest.approx(2_339_850.0)
+        assert cash_after["HKD"].settled_cash == pytest.approx(0.0)
+
 
 
 

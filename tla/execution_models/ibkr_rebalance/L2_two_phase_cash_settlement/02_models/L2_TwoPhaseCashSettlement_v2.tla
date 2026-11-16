@@ -14,13 +14,13 @@ EXTENDS Integers, FiniteSets, TLC
 \*                        DENOTES: target sleeve currency/settlement regime
 \*   step               - control cursor in execute_market_rebalance (src/fundconnect_bot/execution/policy.py:1152-1394)
 \*                        DENOTES: {"PHASE_A","POST_SELL_CASH","FX_STEP","COMPUTE_CAP","PHASE_B","SETTLEMENT"}
-\*   day                - clearing calendar day in 0..3          (src/fundconnect_bot/execution/broker.py:603-608)
+\*   day                - clearing calendar day in 0..3          (src/fundconnect_bot/execution/broker.py:632-637)
 \*                        DENOTES: T+0 execution session followed by T+1, T+2, T+3 settlement days
-\*   settled_cash       - IBKR SettledCash tag per currency      (src/fundconnect_bot/execution/broker.py:319-320, 330)
+\*   settled_cash       - IBKR SettledCash / SettledCashByDate  (src/fundconnect_bot/execution/broker.py:312-329, 345-348, 358-359)
 \*                        DENOTES: cleared cash balance (negative => overnight margin loan accruing interest)
-\*   pending_settle     - unsettled clearing pipeline [ccy][d]   (src/fundconnect_bot/execution/broker.py:315-318)
+\*   pending_settle     - unsettled clearing pipeline [ccy][d]   (src/fundconnect_bot/execution/broker.py:337-344)
 \*                        DENOTES: net cash delta settling on day d \in {1, 2}
-\*   margin_bonus_usd   - Margin AvailableFunds collateral in USD(src/fundconnect_bot/execution/broker.py:321-322, 333-334)
+\*   margin_bonus_usd   - Margin AvailableFunds collateral in USD(src/fundconnect_bot/execution/broker.py:349-350, 362-363)
 \*                        DENOTES: excess margin purchasing power above USD CashBalance
 \*   pre_cash_snap      - `cash` snapshot at entry               (src/fundconnect_bot/execution/policy.py:1152, 1258, 1329)
 \*                        DENOTES: pre-Phase-A CashSnap for active market currency
@@ -40,9 +40,9 @@ EXTENDS Integers, FiniteSets, TLC
 \*                        DENOTES: TRUE iff live Forex("USDHKD", exchange="FXCONV") order transmitted
 \*   fx_executed        - fx_executed_this_run flag              (src/fundconnect_bot/execution/policy.py:1215, 1280, 1337)
 \*                        DENOTES: TRUE iff live FX order was accepted (not INACTIVE/CANCELLED)
-\*   fx_exchange        - fx_contract.exchange used on FX order  (src/fundconnect_bot/execution/broker.py:622)
+\*   fx_exchange        - fx_contract.exchange used on FX order  (src/fundconnect_bot/execution/broker.py:651-657)
 \*                        DENOTES: "NONE" | "IDEALPRO" | "FXCONV"
-\*   virtual_fx_open    - TWS FX Portfolio virtual position flag (src/fundconnect_bot/execution/broker.py:622-624)
+\*   virtual_fx_open    - TWS FX Portfolio virtual position flag (src/fundconnect_bot/execution/broker.py:651-658)
 \*                        DENOTES: TRUE iff USD.HKD trade routed to IDEALPRO instead of FXCONV
 \*   reserve_usd        - unspent USD reserved from Phase B      (src/fundconnect_bot/execution/policy.py:1216, 1268, 1278, 1303)
 \*                        DENOTES: reserve_amount passed to compute_spendable_cash
@@ -102,7 +102,7 @@ UnsettledAfter(p_map, c, cur_day) ==
     (IF 1 > cur_day THEN p_map[c][1] ELSE 0)
     + (IF 2 > cur_day THEN p_map[c][2] ELSE 0)
 
-\* Exact transcription of IbAsyncBrokerAdapter.get_cash (src/fundconnect_bot/execution/broker.py:287-341)
+\* Exact transcription of IbAsyncBrokerAdapter.get_cash (src/fundconnect_bot/execution/broker.py:287-370)
 BrokerCashSnap(s_cash, p_map, m_bonus, cur_day, c) ==
     LET total   == s_cash[c] + UnsettledAfter(p_map, c, cur_day)
         settled == s_cash[c]
@@ -244,7 +244,7 @@ RefreshCashAfterSells ==
 
 ExecBootstrapFx ==
     \* Fix L2-A & L2-B2: requires non_borrowed_usd >= bootstrap_fx_usd (src/fundconnect_bot/execution/policy.py:1258-1274) and routes
-    \* Forex("USDHKD", exchange="FXCONV") so virtual_fx_open = FALSE (src/fundconnect_bot/execution/broker.py:622-646, src/fundconnect_bot/execution/policy.py:1275-1301).
+    \* Forex("USDHKD", exchange="FXCONV") so virtual_fx_open = FALSE (src/fundconnect_bot/execution/broker.py:651-680, src/fundconnect_bot/execution/policy.py:1275-1301).
     /\ step = "FX_STEP"
     /\ market = "US"
     /\ bootstrap_fx_req > 0
@@ -340,7 +340,7 @@ ExecPhaseBBuys ==
 \* ---- Step 6: Multi-day clearing house progression T+0 -> T+1 -> T+2 -> T+3 ----
 
 AdvanceSettlementDay ==
-    \* Credits/debits clearing obligations maturing on day + 1 into SettledCash (src/fundconnect_bot/execution/broker.py:603-608)
+    \* Credits/debits clearing obligations maturing on day + 1 into SettledCash (src/fundconnect_bot/execution/broker.py:632-637)
     /\ step = "SETTLEMENT"
     /\ day < 3
     /\ LET nxt == day + 1 IN

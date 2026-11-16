@@ -1026,6 +1026,129 @@ def test_ib_async_get_cash_accounting_edge_cases(monkeypatch: pytest.MonkeyPatch
         assert compute_spendable_cash(cash_c["USD"]) == pytest.approx(1_000_000.0)
         assert compute_spendable_cash(cash_c["HKD"]) == pytest.approx(0.0)
 
+        # Case 2d: Real IB Gateway 10.3x+ `$LEDGER-CashBalance`, `$LEDGER-TotalCashBalance`,
+        # and `SettledCashByDate` (while ignoring `currency='BASE'`):
+        current_values = [
+            FakeAccountValue("$LEDGER-CashBalance", "9999999.00", "BASE"),
+            FakeAccountValue("$LEDGER-CashBalance", "321799.75", "USD"),
+            FakeAccountValue("$LEDGER-TotalCashBalance", "321799.75", "USD"),
+            FakeAccountValue(
+                "SettledCashByDate",
+                "20261116:-3537.68;20261117:321799.75",
+                "USD",
+            ),
+            FakeAccountValue("$LEDGER-TotalCashBalance", "150000.00", "HKD"),
+            FakeAccountValue(
+                "$LEDGER-SettledCashByDate",
+                "20261116:0.00;20261118:150000.00",
+                "HKD",
+            ),
+        ]
+        cash_d = adapter.get_cash()
+        assert cash_d["USD"].total_cash == pytest.approx(321_799.75)
+        assert cash_d["USD"].settled_cash == pytest.approx(-3_537.68)
+        assert cash_d["USD"].available_funds == pytest.approx(321_799.75)
+        assert cash_d["HKD"].total_cash == pytest.approx(150_000.0)
+        assert cash_d["HKD"].settled_cash == pytest.approx(0.0)
+        assert compute_spendable_cash(cash_d["HKD"]) == pytest.approx(0.0)
+
+        # Case 2e: Bare `CashBalance` / `SettledCash` win over `$LEDGER-*` / `SettledCashByDate`
+        # regardless of tag arrival order:
+        current_values = [
+            FakeAccountValue("$LEDGER-CashBalance", "999.00", "USD"),
+            FakeAccountValue("CashBalance", "500.00", "USD"),
+            FakeAccountValue("SettledCashByDate", "20261116:100.00;20261117:500.00", "USD"),
+            FakeAccountValue("SettledCash", "250.00", "USD"),
+        ]
+        cash_e = adapter.get_cash()
+        assert cash_e["USD"].total_cash == pytest.approx(500.0)
+        assert cash_e["USD"].settled_cash == pytest.approx(250.0)
+
+
+def test_ib_async_convert_usd_to_hkd_fxconv_fallback_to_idealpro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class FakeForex:
+        pair: str
+        exchange: str = "IDEALPRO"
+        secType: str = "CASH"
+        conId: int = 0
+
+    @dataclass
+    class FakeLimitOrder:
+        action: str
+        totalQuantity: int
+        lmtPrice: float
+        tif: str = "DAY"
+        transmit: bool = True
+        account: str = ""
+        orderId: int = 901
+
+    class FakeIB:
+        reject_fxconv: bool = False
+        placed: list[tuple[FakeForex, FakeLimitOrder]]
+
+        def __init__(self) -> None:
+            self.placed = []
+
+        def connect(self, **_: Any) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            return None
+
+        def sleep(self, _: float) -> None:
+            return None
+
+        def qualifyContracts(self, *contracts: Any) -> list[Any]:
+            out: list[Any] = []
+            for c in contracts:
+                if getattr(c, "exchange", "") == "FXCONV" and self.reject_fxconv:
+                    c.conId = 0
+                    continue
+                c.conId = 12345777 if getattr(c, "exchange", "") == "IDEALPRO" else 88888
+                out.append(c)
+            return out
+
+        def reqTickers(self, *_: Any) -> list[Any]:
+            return [types.SimpleNamespace(bid=7.7995, ask=7.8005, close=7.8000, last=7.8000)]
+
+        def placeOrder(self, contract: Any, order: Any) -> Any:
+            self.placed.append((contract, order))
+            return types.SimpleNamespace(
+                contract=contract,
+                order=order,
+                orderStatus=types.SimpleNamespace(status="Submitted", filled=0.0),
+            )
+
+    fake_mod = types.ModuleType("ib_async")
+    fake_mod.Forex = FakeForex  # type: ignore[attr-defined]
+    fake_mod.LimitOrder = FakeLimitOrder  # type: ignore[attr-defined]
+    fake_mod.IB = FakeIB  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ib_async", fake_mod)
+
+    # 1. FXCONV qualifies cleanly -> keeps FXCONV
+    FakeIB.reject_fxconv = False
+    with IbAsyncBrokerAdapter() as adapter_fxconv:
+        rep_fxconv = adapter_fxconv.convert_usd_to_hkd(100_000.0, dry_run=False)
+        assert rep_fxconv.status == "Submitted"
+        placed_contract, _ = adapter_fxconv._ib.placed[0]
+        assert placed_contract.exchange == "FXCONV"
+        assert placed_contract.conId == 88888
+
+    # 2. FXCONV returns [] + conId=0 (Error 200 on USD-base IB Gateway 10.3x+) -> IDEALPRO fallback
+    FakeIB.reject_fxconv = True
+    with IbAsyncBrokerAdapter() as adapter_idealpro:
+        rep_idealpro = adapter_idealpro.convert_usd_to_hkd(300_000.0, dry_run=False)
+        assert rep_idealpro.status == "Submitted"
+        assert rep_idealpro.sell_amount == 300_000
+        placed_contract, placed_order = adapter_idealpro._ib.placed[0]
+        assert placed_contract.exchange == "IDEALPRO"
+        assert placed_contract.conId == 12345777
+        assert placed_order.action == "SELL"
+        assert placed_order.totalQuantity == 300_000
+
 
 def test_ib_async_walk_limit_pumps_ib_sleep_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     sleep_calls: list[float] = []

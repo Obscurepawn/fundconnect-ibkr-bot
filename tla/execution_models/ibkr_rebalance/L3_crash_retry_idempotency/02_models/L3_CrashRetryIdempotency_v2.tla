@@ -25,13 +25,13 @@ EXTENDS Integers, FiniteSets, TLC
 \*                       DENOTES: live IBKR position for target equity
 \*   cash_avail        - non-borrowed USD cash at broker       (src/fundconnect_bot/execution/policy.py:1211, 1262-1266, 1352)
 \*                       DENOTES: realized non-borrowed USD cash available for FX & Phase B
-\*   sell_orders       - TWS order records for Phase A symbol  (src/fundconnect_bot/execution/broker.py:343-393)
+\*   sell_orders       - TWS order records for Phase A symbol  (src/fundconnect_bot/execution/broker.py:372-422)
 \*                       DENOTES: set of [id, client_id, rem_qty, status] on IBKR server
-\*   buy_orders        - TWS order records for Phase B symbol  (src/fundconnect_bot/execution/broker.py:343-393)
+\*   buy_orders        - TWS order records for Phase B symbol  (src/fundconnect_bot/execution/broker.py:372-422)
 \*                       DENOTES: set of [id, client_id, rem_qty, status] on IBKR server
-\*   fx_orders         - TWS CASH USD.HKD order records        (src/fundconnect_bot/execution/broker.py:358-364)
+\*   fx_orders         - TWS CASH USD.HKD order records        (src/fundconnect_bot/execution/broker.py:387-393)
 \*                       DENOTES: open/terminal USD.HKD FX orders across all clientIds
-\*   next_oid          - monotonic TWS order ID counter        (src/fundconnect_bot/execution/broker.py:524)
+\*   next_oid          - monotonic TWS order ID counter        (src/fundconnect_bot/execution/broker.py:553)
 \*                       DENOTES: unique broker order identifier
 \*   disk_completed    - ExecutionState.completed_intents keys (src/fundconnect_bot/execution/policy.py:143, 1149)
 \*                       DENOTES: persisted intent_ids on disk in state/execution_state_*.json
@@ -107,9 +107,9 @@ SumRem(oset) ==
     ELSE LET o == CHOOSE x \in oset : TRUE
          IN (IF o.status = "Working" THEN o.rem_qty ELSE 0) + SumRem(oset \ {o})
 
-\* Fix L3-A: IbAsyncBrokerAdapter.get_open_orders calls ib.reqAllOpenOrders() (src/fundconnect_bot/execution/broker.py:345-349),
+\* Fix L3-A: IbAsyncBrokerAdapter.get_open_orders calls ib.reqAllOpenOrders() (src/fundconnect_bot/execution/broker.py:374-378),
 \* returning open orders across ALL clientIds (including prior crashed sessions and manual TWS orders),
-\* and normalizes CASH USD.HKD open orders to symbol="USD.HKD" (src/fundconnect_bot/execution/broker.py:358-364).
+\* and normalizes CASH USD.HKD open orders to symbol="USD.HKD" (src/fundconnect_bot/execution/broker.py:387-393).
 VisibleWorkingQty(oset) == SumRem(oset)
 
 TotalWorkingSell == SumRem(sell_orders)
@@ -144,7 +144,7 @@ Init ==
 \* ---- Step 1: Load state, query reqAllOpenOrders(), build batch (src/fundconnect_bot/execution/policy.py:1144-1183) ----
 
 BuildBatch ==
-    \* src/fundconnect_bot/execution/policy.py:475-481 subtracts working_qty across all clientIds (src/fundconnect_bot/execution/broker.py:345-349);
+    \* src/fundconnect_bot/execution/policy.py:475-481 subtracts working_qty across all clientIds (src/fundconnect_bot/execution/broker.py:374-378);
     \* src/fundconnect_bot/execution/policy.py:568-570 skips intent if base intent_id \in completed_intents.
     /\ step = "BUILD_BATCH"
     /\ LET vis_sell == VisibleWorkingQty(sell_orders)
@@ -183,7 +183,7 @@ PhaseAFillFull ==
     /\ UNCHANGED <<run_num, run2_client_id, fx_cfg, pos_buy, sell_orders, buy_orders, fx_orders, next_oid, disk_completed, batch_sell_qty, batch_buy_qty, capped_buy_qty, phase_b_intent, phase_b_status, run1_scaled_buy, fx_converted_total>>
 
 PhaseAFillPartial ==
-    \* Phase A sell fills 50% in-session and leaves 50% Working on TWS (src/fundconnect_bot/execution/broker.py:487-488)
+    \* Phase A sell fills 50% in-session and leaves 50% Working on TWS (src/fundconnect_bot/execution/broker.py:516-517)
     /\ step = "PHASE_A"
     /\ run_num = 1
     /\ batch_sell_qty = InitSellQty
@@ -199,7 +199,7 @@ PhaseAFillPartial ==
           /\ UNCHANGED <<run_num, run2_client_id, fx_cfg, pos_buy, buy_orders, fx_orders, disk_completed, batch_sell_qty, batch_buy_qty, capped_buy_qty, phase_b_intent, phase_b_status, run1_scaled_buy, fx_converted_total>>
 
 PhaseAStayWorking ==
-    \* Phase A sell stays WORKING on TWS after walk steps expire (src/fundconnect_bot/execution/broker.py:489-490)
+    \* Phase A sell stays WORKING on TWS after walk steps expire (src/fundconnect_bot/execution/broker.py:518-519)
     /\ step = "PHASE_A"
     /\ batch_sell_qty > 0
     /\ LET ord == [id |-> next_oid, client_id |-> ActiveClientId, rem_qty |-> batch_sell_qty, status |-> "Working"]
