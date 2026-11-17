@@ -34,6 +34,7 @@ from fundconnect_bot.config import (
 from fundconnect_bot.data.calendars import resolve_execution_session, us_open_in_hkt
 from fundconnect_bot.execution.broker import (
     CashSnap,
+    FxConversionReport,
     IbAsyncBrokerAdapter,
     MockBrokerAdapter,
     OpenOrderSnap,
@@ -55,6 +56,7 @@ from fundconnect_bot.execution.policy import (
     build_execution_batch,
     compute_spendable_cash,
     execute_market_rebalance,
+    load_execution_state,
 )
 from fundconnect_bot.strategies.composite import (
     LiveSleeveState,
@@ -1093,6 +1095,7 @@ def test_ib_async_convert_usd_to_hkd_fxconv_fallback_to_idealpro(
 
     class FakeIB:
         reject_fxconv: bool = False
+        return_none_on_reject: bool = False
         placed: list[tuple[FakeForex, FakeLimitOrder]]
 
         def __init__(self) -> None:
@@ -1112,6 +1115,8 @@ def test_ib_async_convert_usd_to_hkd_fxconv_fallback_to_idealpro(
             for c in contracts:
                 if getattr(c, "exchange", "") == "FXCONV" and self.reject_fxconv:
                     c.conId = 0
+                    if self.return_none_on_reject:
+                        out.append(None)
                     continue
                 c.conId = 12345777 if getattr(c, "exchange", "") == "IDEALPRO" else 88888
                 out.append(c)
@@ -1136,6 +1141,7 @@ def test_ib_async_convert_usd_to_hkd_fxconv_fallback_to_idealpro(
 
     # 1. FXCONV qualifies cleanly -> keeps FXCONV
     FakeIB.reject_fxconv = False
+    FakeIB.return_none_on_reject = False
     with IbAsyncBrokerAdapter() as adapter_fxconv:
         rep_fxconv = adapter_fxconv.convert_usd_to_hkd(100_000.0, dry_run=False)
         assert rep_fxconv.status == "Submitted"
@@ -1145,6 +1151,7 @@ def test_ib_async_convert_usd_to_hkd_fxconv_fallback_to_idealpro(
 
     # 2. FXCONV returns [] + conId=0 (Error 200 on USD-base IB Gateway 10.3x+) -> IDEALPRO fallback
     FakeIB.reject_fxconv = True
+    FakeIB.return_none_on_reject = False
     with IbAsyncBrokerAdapter() as adapter_idealpro:
         rep_idealpro = adapter_idealpro.convert_usd_to_hkd(300_000.0, dry_run=False)
         assert rep_idealpro.status == "Submitted"
@@ -1154,6 +1161,100 @@ def test_ib_async_convert_usd_to_hkd_fxconv_fallback_to_idealpro(
         assert placed_contract.conId == 12345777
         assert placed_order.action == "SELL"
         assert placed_order.totalQuantity == 300_000
+
+    # 3. FXCONV returns [None] + conId=0 (real ib_async on Error 200) -> IDEALPRO fallback
+    FakeIB.reject_fxconv = True
+    FakeIB.return_none_on_reject = True
+    with IbAsyncBrokerAdapter() as adapter_none:
+        rep_none = adapter_none.convert_usd_to_hkd(300_000.0, dry_run=False)
+        assert rep_none.status == "Submitted"
+        assert rep_none.sell_amount == 300_000
+        placed_contract, placed_order = adapter_none._ib.placed[0]
+        assert placed_contract.exchange == "IDEALPRO"
+        assert placed_contract.conId == 12345777
+        assert placed_order.action == "SELL"
+        assert placed_order.totalQuantity == 300_000
+
+
+def test_fx_validation_error_not_persisted_in_completed_intents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _single_us_stock_plan("AAPL.US", "0.20000000")
+    quotes = {
+        "AAPL.US": Quote("AAPL.US", bid=199.98, ask=200.02, last=200.00, prev_close=200.00),
+        "SHY.US": Quote("SHY.US", bid=99.99, ask=100.01, last=100.00, prev_close=100.00),
+    }
+    state_dir = tmp_path / "state"
+    broker = MockBrokerAdapter(
+        positions={},
+        cash={"USD": CashSnap("USD", 500_000.0, 500_000.0, 500_000.0)},
+        quotes=quotes,
+    )
+
+    def fail_validation_fx(
+        usd_amount: float, *, limit_rate: float | None = None, dry_run: bool = True
+    ) -> FxConversionReport:
+        _ = (limit_rate, dry_run)
+        return FxConversionReport(
+            pair="USD.HKD",
+            sell_currency="USD",
+            buy_currency="HKD",
+            sell_amount=round(usd_amount),
+            estimated_buy_amount=round(usd_amount * 7.8, 2),
+            rate=7.8,
+            order_id="101",
+            status="ValidationError",
+            settlement_warning="Warning 321: invalid FXCONV contract",
+        )
+
+    monkeypatch.setattr(broker, "convert_usd_to_hkd", fail_validation_fx)
+    rep_fail = execute_market_rebalance(
+        plan,
+        broker,
+        market="US",
+        dry_run=False,
+        bootstrap_fx_usd=450_000.0,
+        allow_fx_convert=True,
+        state_dir=state_dir,
+        config=ExecutionPolicyConfig(poll_interval_sec=0.0),
+    )
+    assert rep_fail.fx_report is not None and rep_fail.fx_report.status == "ValidationError"
+    # Reserve $450k USD must remain unspent for HK (spendable <= $50k -> Phase B buys scaled down)
+    assert broker.cash["USD"].total_cash >= 450_000.0
+
+    state_file = (
+        state_dir / f"execution_state_{plan.us_execution_session.strftime('%Y%m%d')}_US.json"
+    )
+    saved = load_execution_state(state_file, expected_plan_sha256=plan.plan_sha256)
+    assert saved is not None
+    assert not any(
+        entry.get("symbol") == "USD.HKD" for entry in saved.completed_intents.values()
+    )
+
+    # Subsequent retry after FX fix MUST attempt FX conversion (not report ALREADY_COMPLETED)
+    broker_retry = MockBrokerAdapter(
+        positions={},
+        cash={"USD": CashSnap("USD", 500_000.0, 500_000.0, 500_000.0)},
+        quotes=quotes,
+    )
+    rep_retry = execute_market_rebalance(
+        plan,
+        broker_retry,
+        market="US",
+        dry_run=False,
+        bootstrap_fx_usd=450_000.0,
+        allow_fx_convert=True,
+        state_dir=state_dir,
+        config=ExecutionPolicyConfig(poll_interval_sec=0.0),
+    )
+    assert rep_retry.fx_report is not None and rep_retry.fx_report.status == "FILLED"
+    saved_after = load_execution_state(state_file, expected_plan_sha256=plan.plan_sha256)
+    assert saved_after is not None
+    assert any(
+        entry.get("symbol") == "USD.HKD" and entry.get("status") == "FILLED"
+        for entry in saved_after.completed_intents.values()
+    )
 
 
 def test_ib_async_walk_limit_pumps_ib_sleep_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:

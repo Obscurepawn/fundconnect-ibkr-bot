@@ -1274,7 +1274,7 @@ def execute_market_rebalance(
             else:
                 fx_report = broker.convert_usd_to_hkd(bootstrap_fx_usd, dry_run=False)
                 alerts.append(fx_report.settlement_warning)
-                if fx_report.status.upper() in ("INACTIVE", "CANCELLED", "APICANCELLED"):
+                if fx_report.status.upper() not in ("FILLED", "SUBMITTED", "PRESUBMITTED", "PENDINGSUBMIT", "APIPENDING"):
                     reserve_usd = bootstrap_fx_usd
                 else:
                     fx_executed_this_run = True

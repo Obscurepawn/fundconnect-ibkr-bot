@@ -1,4 +1,4 @@
-# anchors.lock — written by anchors.sh update on 2026-11-17T22:47:01
+# anchors.lock — written by anchors.sh update on 2026-11-17T22:55:04
 # path<TAB>line<TAB>sha256(of that line's current text)  — re-read with 'anchors.sh check'
 src/fundconnect_bot/cli.py	564	f1f3ebee6a1302f9d628d1a551cdfe6e319789ac0498b85de7f3ef34f3b6d520
 src/fundconnect_bot/cli.py	565	cdca7fa1b566d34cf7f8ccbda3961bdb5df6e0e2694b984acaef89a550a68304
@@ -179,7 +179,7 @@ src/fundconnect_bot/execution/broker.py	636	c00350429101c340d49c686eddc47de3be9c
 src/fundconnect_bot/execution/broker.py	637	ab38e8d6689d452b1150728fe140e960372d5a87a7688cf51b03f0996608b842
 src/fundconnect_bot/execution/broker.py	651	ad04956e2188a490338f6e91409bd9f4a0acbd78bbc711a4a51689486b5f6da9
 src/fundconnect_bot/execution/broker.py	652	b302098ccf259554950fc14c87732bbc906a62fff0eadcda53e7ad9d4fa44c3d
-src/fundconnect_bot/execution/broker.py	653	c7518ab5697d7fd4b757d9506e2d652f275bc6347b375b6c7b7b8609cf92a291
+src/fundconnect_bot/execution/broker.py	653	1d3fde0be8a0f08455ace9a97fb46009d3add29e8fbacec0ce26771851c2449e
 src/fundconnect_bot/execution/broker.py	654	edb70f42b49ca50ec2a0e0574d1558e0e7d5587626e36002f985529e95319a45
 src/fundconnect_bot/execution/broker.py	655	8c83da7093214f23475369fed99caf71ffa302d22d3c244c34dc1a5a971de797
 src/fundconnect_bot/execution/broker.py	656	1a1ae0f1e8593007a923a2ed9866491e5675d713fd8be62696073c5941e69661
@@ -432,7 +432,7 @@ src/fundconnect_bot/execution/policy.py	1273	70ddf14be8889fc2270882d9ea2fc66b42f
 src/fundconnect_bot/execution/policy.py	1274	eccc3a970945550e279f743fc701c3868a48c7fe7def86f65b71bbdffc6ffcf9
 src/fundconnect_bot/execution/policy.py	1275	3697d35d31c31c2692b72e0f14bbd11f1a19c58f98d934b6c7bd69da78d80d36
 src/fundconnect_bot/execution/policy.py	1276	81444491bc8d851ea14269d36020557f755b429f5ff0791bd7254e97164095c2
-src/fundconnect_bot/execution/policy.py	1277	ff05a1a5932d412414462a037eeab6200f89faa4f120b14d86db298e6363162b
+src/fundconnect_bot/execution/policy.py	1277	c924da1dd90790a6fd6a58cf323dd596266cb8f1276ab03c33396f3507750973
 src/fundconnect_bot/execution/policy.py	1278	d2f55e1ac7a3b4523890af36ffd58a44d8d1e46eb32d018ebc7918b6a2fd1c39
 src/fundconnect_bot/execution/policy.py	1279	ec0c4f9cc77ace770b24d8ed4a9461752271a7daea7822bbda9f1b7ce683e370
 src/fundconnect_bot/execution/policy.py	1280	3808770f7a64fe82be8aef7a8de5932d23616054f8acc5c92d955039ce942416

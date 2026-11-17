@@ -1,4 +1,4 @@
-# anchors.lock — written by anchors.sh update on 2026-11-17T22:47:01
+# anchors.lock — written by anchors.sh update on 2026-11-17T22:55:04
 # path<TAB>line<TAB>sha256(of that line's current text)  — re-read with 'anchors.sh check'
 src/fundconnect_bot/cli.py	321	915daaa3b889dfea7ca8b2113cc6f0dc1fc4eab6708484dada69a629cbef2d83
 src/fundconnect_bot/cli.py	446	1b097c23723e44475863f26704b33f090c8836398b841368a535478ca4ae9ae7
@@ -339,7 +339,7 @@ src/fundconnect_bot/execution/policy.py	1273	70ddf14be8889fc2270882d9ea2fc66b42f
 src/fundconnect_bot/execution/policy.py	1274	eccc3a970945550e279f743fc701c3868a48c7fe7def86f65b71bbdffc6ffcf9
 src/fundconnect_bot/execution/policy.py	1275	3697d35d31c31c2692b72e0f14bbd11f1a19c58f98d934b6c7bd69da78d80d36
 src/fundconnect_bot/execution/policy.py	1276	81444491bc8d851ea14269d36020557f755b429f5ff0791bd7254e97164095c2
-src/fundconnect_bot/execution/policy.py	1277	ff05a1a5932d412414462a037eeab6200f89faa4f120b14d86db298e6363162b
+src/fundconnect_bot/execution/policy.py	1277	c924da1dd90790a6fd6a58cf323dd596266cb8f1276ab03c33396f3507750973
 src/fundconnect_bot/execution/policy.py	1278	d2f55e1ac7a3b4523890af36ffd58a44d8d1e46eb32d018ebc7918b6a2fd1c39
 src/fundconnect_bot/execution/policy.py	1279	ec0c4f9cc77ace770b24d8ed4a9461752271a7daea7822bbda9f1b7ce683e370
 src/fundconnect_bot/execution/policy.py	1280	3808770f7a64fe82be8aef7a8de5932d23616054f8acc5c92d955039ce942416

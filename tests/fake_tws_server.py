@@ -1333,6 +1333,8 @@ class FakeIB:
         for c in contracts:
             if self._server._qualify_one(c, client_id=self.clientId):
                 qualified.append(c)
+            elif self._server.reject_fxconv:
+                qualified.append(None)
         return qualified
 
     def reqTickers(self, *contracts: Any) -> list[Ticker]:

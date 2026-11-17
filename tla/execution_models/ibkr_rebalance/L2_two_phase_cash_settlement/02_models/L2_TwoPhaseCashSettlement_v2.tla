@@ -262,7 +262,7 @@ ExecBootstrapFx ==
     /\ UNCHANGED <<scenario, market, day, settled_cash, margin_bonus_usd, pre_cash_snap, after_sells_snap, phase_a_req, realized_sell_net, phase_b_req, bootstrap_fx_req, allow_fx_convert, spendable_cash, capped_buy_outlay>>
 
 ExecBootstrapFxRejected ==
-    \* If FXCONV order returns INACTIVE/CANCELLED/APICANCELLED, src/fundconnect_bot/execution/policy.py:1277-1278 keeps
+    \* If FX order returns a non-live/non-fill status (e.g., ValidationError/INACTIVE/CANCELLED/APICANCELLED), src/fundconnect_bot/execution/policy.py:1277-1278 keeps
     \* fx_executed_this_run = False and reserves bootstrap_fx_usd unspent from Phase B buys.
     /\ step = "FX_STEP"
     /\ market = "US"

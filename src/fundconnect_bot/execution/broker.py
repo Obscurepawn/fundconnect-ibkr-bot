@@ -650,7 +650,7 @@ class IbAsyncBrokerAdapter:
         ib_mod, ib = self._require_ib()
         fx_contract = ib_mod.Forex("USDHKD", exchange="FXCONV")
         qualified = ib.qualifyContracts(fx_contract)
-        if qualified == [] and getattr(fx_contract, "conId", None) == 0:
+        if not any(qualified or ()) and int(getattr(fx_contract, "conId", 0) or 0) == 0:
             # IB Gateway 10.3x+ USD-base accounts reject FXCONV with Error 200 (conId=0);
             # fall back to IDEALPRO (get_positions() filters sec_type in ("", "STK")).
             fx_contract = ib_mod.Forex("USDHKD")
