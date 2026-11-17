@@ -17,7 +17,11 @@ from typing import Any
 
 import pytest
 
-from fundconnect_bot.cli import _find_previous_plan_before, _resolve_cache_dirs
+from fundconnect_bot.cli import (
+    _find_previous_plan_before,
+    _format_plan_markdown,
+    _resolve_cache_dirs,
+)
 from fundconnect_bot.cli import main as cli_main
 from fundconnect_bot.config import (
     BOOTSTRAP_SOURCE_SYMBOL,
@@ -25,6 +29,7 @@ from fundconnect_bot.config import (
     US_DEFENSIVE_SYMBOL,
     ExecutionPolicyConfig,
     IbkrConnectionConfig,
+    SleeveCadences,
 )
 from fundconnect_bot.data.calendars import resolve_execution_session, us_open_in_hkt
 from fundconnect_bot.execution.broker import (
@@ -55,6 +60,7 @@ from fundconnect_bot.strategies.composite import (
     LiveSleeveState,
     PlanTarget,
     WeeklyPlan,
+    _should_freeze_sleeve,
     build_weekly_plan,
     load_weekly_plan,
     save_weekly_plan,
@@ -1655,3 +1661,275 @@ def test_cli_plan_rerun_selects_strictly_older_previous_plan(
     second_13 = load_weekly_plan(tmp_path / "plan_20261113.json")
     assert [t.to_dict() for t in second_13.targets] == [t.to_dict() for t in first_13.targets]
     assert second_13.sleeve_diagnostics == first_13.sleeve_diagnostics
+
+
+# ---------------------------------------------------------------------------
+# 21. Hybrid C Rebalancing Cadence (2W AW + 1W SQM + 1W HK_ETF + 2W HK_BC)
+# ---------------------------------------------------------------------------
+def _sleeve_contrib_map(plan: WeeklyPlan, sleeve_name: str) -> dict[str, Decimal]:
+    return {
+        t.symbol: Decimal(t.sleeve_contributions[sleeve_name])
+        for t in plan.targets
+        if sleeve_name in t.sleeve_contributions
+    }
+
+
+def test_sleeve_cadences_config_and_freeze_guards() -> None:
+    hc = SleeveCadences.hybrid_c()
+    assert (hc.us_macro_weeks, hc.us_sqm_weeks, hc.hk_etf_weeks, hc.hk_bluechip_weeks) == (
+        2,
+        1,
+        1,
+        2,
+    )
+    assert SleeveCadences() == hc
+
+    u1 = SleeveCadences.uniform_1w()
+    assert (u1.us_macro_weeks, u1.us_sqm_weeks, u1.hk_etf_weeks, u1.hk_bluechip_weeks) == (
+        1,
+        1,
+        1,
+        1,
+    )
+
+    with pytest.raises(ValueError, match=">= 1"):
+        SleeveCadences(us_macro_weeks=0)
+    with pytest.raises(ValueError, match=">= 1"):
+        SleeveCadences(hk_bluechip_weeks=-1)
+
+    prev = _make_minimal_plan(
+        market="HK",
+        targets=[
+            PlanTarget(
+                symbol="0939.HK",
+                ibkr_symbol="939",
+                market="HK",
+                exchange="SEHK",
+                currency="HKD",
+                asset_class="stock",
+                portfolio_weight=Decimal("0.05000000"),
+                sleeve_contributions={"hk_southbound_bluechip_v1": "0.05000000"},
+                ref_close=Decimal("10.50"),
+                lot_size=1000,
+                defensive_fallback="3053.HK",
+                is_defensive_fallback=False,
+            )
+        ],
+    )
+    # 7 days after 2026-11-13 -> within 11-day freeze window when 0939.HK is active
+    freeze_ok, last_eval, fw = _should_freeze_sleeve(
+        "hk_southbound_bluechip_v1",
+        date(2026, 11, 20),
+        2,
+        prev,
+        {"0939.HK", "3053.HK"},
+        Decimal("0.10"),
+    )
+    assert freeze_ok is True
+    assert last_eval == date(2026, 11, 13)
+    assert fw == {"0939.HK": Decimal("0.50000000")}
+
+    # Missing/suspended symbol on target_asof cleanly falls back to re-evaluation
+    freeze_missing, _, _ = _should_freeze_sleeve(
+        "hk_southbound_bluechip_v1",
+        date(2026, 11, 20),
+        2,
+        prev,
+        {"3053.HK"},
+        Decimal("0.10"),
+    )
+    assert freeze_missing is False
+
+    # Shortened Thanksgiving week (Wednesday 11d after 2026-11-13 -> 2026-11-24) evaluates fresh
+    freeze_11d, _, _ = _should_freeze_sleeve(
+        "hk_southbound_bluechip_v1",
+        date(2026, 11, 24),
+        2,
+        prev,
+        {"0939.HK", "3053.HK"},
+        Decimal("0.10"),
+    )
+    assert freeze_11d is False
+
+    # Non-positive elapsed days does not freeze
+    freeze_same_day, _, _ = _should_freeze_sleeve(
+        "hk_southbound_bluechip_v1",
+        date(2026, 11, 13),
+        2,
+        prev,
+        {"0939.HK"},
+        Decimal("0.10"),
+    )
+    assert freeze_same_day is False
+
+
+def test_hybrid_c_three_week_sequential_progression_20261030_to_20261113() -> None:
+    # Week 0 (2026-10-30): cold start -> all 4 sleeves EVALUATED
+    w0 = build_weekly_plan(
+        asof_date=date(2026, 10, 30),
+        refresh_data=False,
+        us_cache_dir=US_CACHE_DIR,
+        hk_cache_dir=HK_CACHE_DIR,
+        cadences=SleeveCadences.hybrid_c(),
+    )
+    assert w0.summary["cadence_profile"] == "hybrid_c"
+    for sleeve in (
+        "us_macro_allweather_v1",
+        "us_sector_quality_mom_v1",
+        "hk_etf_southbound_rot_v1",
+        "hk_southbound_bluechip_v1",
+    ):
+        assert w0.sleeve_diagnostics[sleeve]["cadence_action"] == "EVALUATED"
+        assert w0.sleeve_diagnostics[sleeve]["last_evaluated_asof"] == "2026-10-30"
+
+    # Week 1 (2026-11-06, 7 days later < 11d): 2W sleeves freeze exact prior sleeve weights
+    w1 = build_weekly_plan(
+        asof_date=date(2026, 11, 6),
+        refresh_data=False,
+        us_cache_dir=US_CACHE_DIR,
+        hk_cache_dir=HK_CACHE_DIR,
+        cadences=SleeveCadences.hybrid_c(),
+        previous_plan=w0,
+    )
+    assert w1.summary["cadence_profile"] == "hybrid_c"
+    assert w1.sleeve_diagnostics["us_macro_allweather_v1"]["cadence_action"] == "HELD_2W_FREEZE"
+    assert w1.sleeve_diagnostics["us_macro_allweather_v1"]["cadence_weeks"] == 2
+    assert w1.sleeve_diagnostics["us_macro_allweather_v1"]["freeze_asof"] == "2026-11-06"
+    assert w1.sleeve_diagnostics["us_macro_allweather_v1"]["last_evaluated_asof"] == "2026-10-30"
+
+    assert w1.sleeve_diagnostics["hk_southbound_bluechip_v1"]["cadence_action"] == "HELD_2W_FREEZE"
+    assert w1.sleeve_diagnostics["hk_southbound_bluechip_v1"]["cadence_weeks"] == 2
+    assert w1.sleeve_diagnostics["hk_southbound_bluechip_v1"]["freeze_asof"] == "2026-11-06"
+    assert w1.sleeve_diagnostics["hk_southbound_bluechip_v1"]["last_evaluated_asof"] == "2026-10-30"
+    assert w1.sleeve_diagnostics["hk_southbound_bluechip_v1"]["cold_start"] is False
+
+    # 1W sleeves evaluate every week
+    assert w1.sleeve_diagnostics["us_sector_quality_mom_v1"]["cadence_action"] == "EVALUATED"
+    assert w1.sleeve_diagnostics["us_sector_quality_mom_v1"]["last_evaluated_asof"] == "2026-11-06"
+    assert w1.sleeve_diagnostics["hk_etf_southbound_rot_v1"]["cadence_action"] == "EVALUATED"
+    assert w1.sleeve_diagnostics["hk_etf_southbound_rot_v1"]["last_evaluated_asof"] == "2026-11-06"
+
+    # Frozen sleeves hold exact prior sleeve weights (<= 1e-8 rounding tolerance for 0.35 divisor)
+    w0_bc = _sleeve_contrib_map(w0, "hk_southbound_bluechip_v1")
+    w1_bc = _sleeve_contrib_map(w1, "hk_southbound_bluechip_v1")
+    assert set(w1_bc) == set(w0_bc)
+    for sym, exp_c in w0_bc.items():
+        assert w1_bc[sym] == exp_c
+
+    w0_mac = _sleeve_contrib_map(w0, "us_macro_allweather_v1")
+    w1_mac = _sleeve_contrib_map(w1, "us_macro_allweather_v1")
+    assert set(w1_mac) == set(w0_mac)
+    for sym, exp_c in w0_mac.items():
+        assert abs(w1_mac[sym] - exp_c) <= Decimal("0.00000001")
+
+    # Week 2 (2026-11-13, 14 days after last_evaluated_asof=2026-10-30 >= 11d): all 4 evaluate!
+    w2 = build_weekly_plan(
+        asof_date=date(2026, 11, 13),
+        refresh_data=False,
+        us_cache_dir=US_CACHE_DIR,
+        hk_cache_dir=HK_CACHE_DIR,
+        cadences=SleeveCadences.hybrid_c(),
+        previous_plan=w1,
+    )
+    for sleeve in (
+        "us_macro_allweather_v1",
+        "us_sector_quality_mom_v1",
+        "hk_etf_southbound_rot_v1",
+        "hk_southbound_bluechip_v1",
+    ):
+        assert w2.sleeve_diagnostics[sleeve]["cadence_action"] == "EVALUATED"
+        assert w2.sleeve_diagnostics[sleeve]["last_evaluated_asof"] == "2026-11-13"
+        assert "freeze_asof" not in w2.sleeve_diagnostics[sleeve]
+
+    md = _format_plan_markdown(w1)
+    assert "hybrid_c" in md
+    assert "HELD_2W_FREEZE" in md
+    assert "EVALUATED" in md
+
+
+def test_cli_plan_hybrid_c_auto_picks_previous_plan_and_uniform_1w_flag(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Step 1: Generate 2026-11-06 plan in tmp_path without --sync-ibkr-holdings
+    assert (
+        cli_main(
+            [
+                "plan",
+                "--from-cache",
+                "--asof",
+                "2026-11-06",
+                "--us-cache-dir",
+                str(US_CACHE_DIR),
+                "--hk-cache-dir",
+                str(HK_CACHE_DIR),
+                "--out-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    plan_06 = load_weekly_plan(tmp_path / "plan_20261106.json")
+    assert plan_06.summary["cadence_profile"] == "hybrid_c"
+    capsys.readouterr()
+
+    # Step 2: Generate 2026-11-13 plan in the same out_dir WITHOUT --sync-ibkr-holdings;
+    # default --cadence hybrid-c MUST auto-load plan_20261106.json and freeze 2W sleeves!
+    assert (
+        cli_main(
+            [
+                "plan",
+                "--from-cache",
+                "--asof",
+                "2026-11-13",
+                "--us-cache-dir",
+                str(US_CACHE_DIR),
+                "--hk-cache-dir",
+                str(HK_CACHE_DIR),
+                "--out-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    out_md = capsys.readouterr().out
+    assert "HELD_2W_FREEZE" in out_md
+    plan_13_hc = load_weekly_plan(tmp_path / "plan_20261113.json")
+    assert plan_13_hc.summary["cadence_profile"] == "hybrid_c"
+    assert plan_13_hc.sleeve_diagnostics["us_macro_allweather_v1"]["cadence_action"] == "HELD_2W_FREEZE"
+    assert plan_13_hc.sleeve_diagnostics["hk_southbound_bluechip_v1"]["cadence_action"] == "HELD_2W_FREEZE"
+    assert plan_13_hc.sleeve_diagnostics["us_sector_quality_mom_v1"]["cadence_action"] == "EVALUATED"
+    assert plan_13_hc.sleeve_diagnostics["hk_etf_southbound_rot_v1"]["cadence_action"] == "EVALUATED"
+
+    # Step 3: --cadence uniform-1w evaluates all 4 sleeves even when plan_20261106.json exists
+    u1_dir = tmp_path / "uniform_1w"
+    save_weekly_plan(plan_06, u1_dir / "plan_20261106.json")
+    assert (
+        cli_main(
+            [
+                "plan",
+                "--from-cache",
+                "--asof",
+                "2026-11-13",
+                "--cadence",
+                "uniform-1w",
+                "--us-cache-dir",
+                str(US_CACHE_DIR),
+                "--hk-cache-dir",
+                str(HK_CACHE_DIR),
+                "--out-dir",
+                str(u1_dir),
+            ]
+        )
+        == 0
+    )
+    plan_13_u1 = load_weekly_plan(u1_dir / "plan_20261113.json")
+    assert plan_13_u1.summary["cadence_profile"] == "uniform_1w"
+    for sleeve in (
+        "us_macro_allweather_v1",
+        "us_sector_quality_mom_v1",
+        "hk_etf_southbound_rot_v1",
+        "hk_southbound_bluechip_v1",
+    ):
+        assert plan_13_u1.sleeve_diagnostics[sleeve]["cadence_weeks"] == 1
+        assert plan_13_u1.sleeve_diagnostics[sleeve]["cadence_action"] == "EVALUATED"

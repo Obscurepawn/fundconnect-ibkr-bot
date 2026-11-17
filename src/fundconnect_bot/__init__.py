@@ -8,6 +8,7 @@ from .config import (
     US_DEFENSIVE_SYMBOL,
     ExecutionPolicyConfig,
     IbkrConnectionConfig,
+    SleeveCadences,
     SleeveWeights,
 )
 
@@ -16,6 +17,7 @@ __all__ = [
     "ExecutionPolicyConfig",
     "HK_DEFENSIVE_SYMBOL",
     "IbkrConnectionConfig",
+    "SleeveCadences",
     "SleeveWeights",
     "US_DEFENSIVE_SYMBOL",
     "__version__",

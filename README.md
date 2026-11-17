@@ -6,16 +6,16 @@
 
 ## 1. Composite Portfolio Architecture
 
-At each completed Friday close, `fundconnect-bot plan` evaluates four point-in-time (PIT) quantitative sleeves and emits an immutable, SHA-256-verified execution plan (`plan_YYYYMMDD.json` and `plans/latest_plan.json`):
+At each completed Friday close, `fundconnect-bot plan` evaluates four point-in-time (PIT) quantitative sleeves under the **Hybrid C** rebalancing cadence (default `--cadence hybrid-c`: `+52.75%` empirical backtest return, Sharpe `2.097`, MaxDD `-6.09%`; pass `--cadence uniform-1w` for weekly evaluation on all four sleeves) and emits an immutable, SHA-256-verified execution plan (`plan_YYYYMMDD.json` and `plans/latest_plan.json`):
 
-| Sleeve ID | Portfolio Weight | Universe & Causal Data Inputs | Defensive Safe Haven |
-| :--- | ---: | :--- | :--- |
-| `us_macro_allweather_v1` | **35%** | 10 US Macro/Tactical ETFs (`QQQ`, `SPY`, `SCHD`, `GLD`, `IEF`, `TLT`, `SHY`, `IBIT`, `KWEB`, `ASHR`) + Cryptoracle BTC 1d sentiment (`+15m` lag) | `SHY.US` |
-| `us_sector_quality_mom_v1` | **35%** | 48 US large-cap equities across 8 sector groups + strict SEC EDGAR `acceptedDate` PIT quarterly fundamentals (`180d` TTL) | `SHY.US` |
-| `hk_etf_southbound_rot_v1` | **20%** | 6 HKD-counter HKEX ETFs (`2800.HK`, `2828.HK`, `3033.HK`, `2823.HK`, `3081.HK`, `3053.HK`) + Tushare Pro Southbound CCASS/GGT breadth (`T+1 08:30 HKT`) | `3053.HK` |
-| `hk_southbound_bluechip_v1` | **10%** | 47 HKD-counter Southbound blue chips + CCASS `hk_hold` abnormal flow, persistence, and anti-crowding filters | `3053.HK` |
+| Sleeve ID | Portfolio Weight | Cadence | Universe & Causal Data Inputs | Defensive Safe Haven |
+| :--- | ---: | :---: | :--- | :--- |
+| `us_macro_allweather_v1` | **35%** | **2W** (`US_AW`) | 10 US Macro/Tactical ETFs (`QQQ`, `SPY`, `SCHD`, `GLD`, `IEF`, `TLT`, `SHY`, `IBIT`, `KWEB`, `ASHR`) + Cryptoracle BTC 1d sentiment (`+15m` lag) | `SHY.US` |
+| `us_sector_quality_mom_v1` | **35%** | **1W** (`US_SQM`) | 48 US large-cap equities across 8 sector groups + strict SEC EDGAR `acceptedDate` PIT quarterly fundamentals (`180d` TTL) | `SHY.US` |
+| `hk_etf_southbound_rot_v1` | **20%** | **1W** (`HK_ETF`) | 6 HKD-counter HKEX ETFs (`2800.HK`, `2828.HK`, `3033.HK`, `2823.HK`, `3081.HK`, `3053.HK`) + Tushare Pro Southbound CCASS/GGT breadth (`T+1 08:30 HKT`) | `3053.HK` |
+| `hk_southbound_bluechip_v1` | **10%** | **2W** (`HK_BC`) | 47 HKD-counter Southbound blue chips + CCASS `hk_hold` abnormal flow, persistence, and anti-crowding filters | `3053.HK` |
 
-When `--sync-ibkr-holdings` is supplied on subsequent weeks, live IBKR holdings and the prior week's plan diagnostics are mapped back into per-sleeve weights so rank-buffer hysteresis (Top-11 HK blue-chip buffer, `+0.20` US SQM retention bonus) and drift-band turnover gates operate seamlessly in live trading. On initial cold start (`0` HK stocks held), the engine automatically runs pure cross-sectional entry selection.
+In **Hybrid C**, `us_macro_allweather_v1` (`2W US_AW`) and `hk_southbound_bluechip_v1` (`2W HK_BC`) freeze their prior sleeve-relative target weights on off-weeks (`HELD_2W_FREEZE`, `11`-day shortened-week threshold) whenever `--out-dir` contains a strictly older `plan_*.json` (even without `--sync-ibkr-holdings`), while `us_sector_quality_mom_v1` (`1W US_SQM`) and `hk_etf_southbound_rot_v1` (`1W HK_ETF`) evaluate every week. When `--sync-ibkr-holdings` is supplied on subsequent weeks, live IBKR holdings and the prior week's plan diagnostics are mapped back into per-sleeve weights so rank-buffer hysteresis (Top-11 HK blue-chip buffer, `+0.20` US SQM retention bonus) and drift-band turnover gates operate seamlessly in live trading. On initial cold start (`0` HK stocks held), the engine automatically runs pure cross-sectional entry selection.
 
 ---
 

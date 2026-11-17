@@ -17,6 +17,7 @@ from .config import (
     NY_TZ,
     ExecutionPolicyConfig,
     IbkrConnectionConfig,
+    SleeveCadences,
     SleeveWeights,
 )
 from .data.calendars import latest_completed_week_end
@@ -125,6 +126,21 @@ def _synthetic_quote(
 
 
 def _format_plan_markdown(plan: WeeklyPlan) -> str:
+    cadence_profile = plan.summary.get("cadence_profile", "hybrid_c")
+    cadence_parts: list[str] = []
+    for sleeve_name in (
+        "us_macro_allweather_v1",
+        "us_sector_quality_mom_v1",
+        "hk_etf_southbound_rot_v1",
+        "hk_southbound_bluechip_v1",
+    ):
+        s_diag = plan.sleeve_diagnostics.get(sleeve_name)
+        if isinstance(s_diag, Mapping) and (
+            "cadence_weeks" in s_diag or "cadence_action" in s_diag
+        ):
+            cw = s_diag.get("cadence_weeks", 1)
+            act = s_diag.get("cadence_action", "EVALUATED")
+            cadence_parts.append(f"`{sleeve_name}` (`{cw}W` {act})")
     lines = [
         f"# 周一自动调仓计划书 (`asof={plan.asof_date.isoformat()}`)",
         "",
@@ -132,6 +148,11 @@ def _format_plan_markdown(plan: WeeklyPlan) -> str:
         f"- **港股执行交易日**: `{plan.hk_execution_session.isoformat()}` (`09:48 HKT`, 节假日顺延=`{plan.hk_deferred_holiday}`)",
         f"- **美股执行交易日**: `{plan.us_execution_session.isoformat()}` (美东 `09:48 ET` / 开盘 `{plan.us_open_hkt}`, 节假日顺延=`{plan.us_deferred_holiday}`)",
         "- **四策略组合配比**: `35% us_macro_allweather_v1` + `35% us_sector_quality_mom_v1` + `20% hk_etf_southbound_rot_v1` + `10% hk_southbound_bluechip_v1`",
+        *(
+            [f"- **调仓频率 (`{cadence_profile}`)**: " + " · ".join(cadence_parts)]
+            if cadence_parts
+            else []
+        ),
         f"- **目标总仓位**: `{Decimal(plan.summary['total_invested_weight']):.2%}` (美股 `{Decimal(plan.summary['us_invested_weight']):.2%}` + 港股 `{Decimal(plan.summary['hk_invested_weight']):.2%}`，现金缓冲 `{Decimal(plan.summary['total_cash_buffer_weight']):.2%}`)",
         "",
         "| 标的 | IBKR代码 | 市场/交易所 | 币种 | 组合目标权重 | 每手股数 (Lot) | 周五参考收盘价 | 防御回退标的 |",
@@ -259,6 +280,11 @@ def _cmd_plan(args: argparse.Namespace) -> int:
                     pw, previous_plan=prev_plan
                 )
 
+    cadences = (
+        SleeveCadences.uniform_1w()
+        if args.cadence == "uniform-1w"
+        else SleeveCadences.hybrid_c()
+    )
     plan = build_weekly_plan(
         asof_date=asof,
         refresh_data=args.refresh_data,
@@ -267,6 +293,8 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         hk_cache_dir=hk_dir,
         sleeve_weights=SleeveWeights(),
         live_state=live_state,
+        cadences=cadences,
+        previous_plan=prev_plan,
     )
     out_file = args.out_dir / f"plan_{plan.asof_date.strftime('%Y%m%d')}.json"
     save_weekly_plan(plan, out_file)
@@ -496,6 +524,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("--us-cache-dir", type=Path, default=None)
     p_plan.add_argument("--hk-cache-dir", type=Path, default=None)
     p_plan.add_argument("--out-dir", type=Path, default=Path("plans"))
+    p_plan.add_argument(
+        "--cadence",
+        choices=["hybrid-c", "uniform-1w"],
+        default="hybrid-c",
+        help="Rebalance cadence profile (default hybrid-c: 2W AW + 1W SQM + 1W HK_ETF + 2W HK_BC)",
+    )
     p_plan.add_argument(
         "--sync-ibkr-holdings",
         action="store_true",

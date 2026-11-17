@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
@@ -17,6 +17,7 @@ from ..config import (
     US_DEFENSIVE_SYMBOL,
     US_EQUITY_STOCKS,
     US_MACRO_ETFS,
+    SleeveCadences,
     SleeveWeights,
 )
 from ..data.calendars import (
@@ -42,6 +43,7 @@ from .us_quality_mom import compute_us_sqm_targets
 WEIGHT_QUANT = Decimal("0.00000001")
 PLAN_SCHEMA_ID = "fundconnect-ibkr-plan/v1"
 _DEFAULT_SLEEVE_WEIGHTS = SleeveWeights()
+_DEFAULT_SLEEVE_CADENCES = SleeveCadences.hybrid_c()
 
 
 def _q_weight(val: Decimal) -> Decimal:
@@ -84,6 +86,7 @@ class LiveSleeveState:
     hk_etf_weights: Mapping[str, float] | None = None
     hk_bluechip_weights: Mapping[str, float] | None = None
     hk_bluechip_prev_regime_scale: float | None = None
+    previous_plan: WeeklyPlan | None = None
 
     @classmethod
     def from_live_portfolio_weights(
@@ -157,6 +160,7 @@ class LiveSleeveState:
             hk_etf_weights=hk_etf_w or None,
             hk_bluechip_weights=hk_bc_w or None,
             hk_bluechip_prev_regime_scale=eff_hk_bc_scale,
+            previous_plan=previous_plan,
         )
 
 
@@ -266,6 +270,112 @@ class WeeklyPlan:
 _DEFAULT_LIVE_STATE = LiveSleeveState()
 
 
+def _cadence_profile_name(cadences: SleeveCadences) -> str:
+    if cadences == SleeveCadences.hybrid_c():
+        return "hybrid_c"
+    if cadences == SleeveCadences.uniform_1w():
+        return "uniform_1w"
+    return (
+        f"custom_{cadences.us_macro_weeks}w_{cadences.us_sqm_weeks}w_"
+        f"{cadences.hk_etf_weeks}w_{cadences.hk_bluechip_weeks}w"
+    )
+
+
+def _should_freeze_sleeve(
+    sleeve_name: str,
+    target_asof: date,
+    cadence_weeks: int,
+    previous_plan: WeeklyPlan | None,
+    active_symbols_on_asof: set[str],
+    prev_sleeve_weight: Decimal,
+) -> tuple[bool, date, dict[str, Decimal]]:
+    if cadence_weeks <= 1 or previous_plan is None or prev_sleeve_weight <= 0:
+        return False, target_asof, {}
+
+    prev_diag_raw = previous_plan.sleeve_diagnostics.get(sleeve_name)
+    prev_diag: Mapping[str, Any] = prev_diag_raw if isinstance(prev_diag_raw, Mapping) else {}
+    if "last_evaluated_asof" in prev_diag:
+        last_eval_date = date.fromisoformat(str(prev_diag["last_evaluated_asof"]))
+    elif "session" in prev_diag:
+        last_eval_date = date.fromisoformat(str(prev_diag["session"]))
+    else:
+        last_eval_date = previous_plan.asof_date
+
+    elapsed = (target_asof - last_eval_date).days
+    min_days = 7 * cadence_weeks - 3
+    if elapsed >= min_days or elapsed <= 0:
+        return False, target_asof, {}
+
+    frozen_weights: dict[str, Decimal] = {}
+    for t in previous_plan.targets:
+        contrib_str = t.sleeve_contributions.get(sleeve_name)
+        if contrib_str is None:
+            continue
+        sw = _q_weight(Decimal(contrib_str) / prev_sleeve_weight)
+        if sw > 0:
+            frozen_weights[t.symbol] = sw
+
+    if not frozen_weights or not all(sym in active_symbols_on_asof for sym in frozen_weights):
+        return False, target_asof, {}
+
+    return True, last_eval_date, frozen_weights
+
+
+def _build_frozen_diag(
+    prev_diag: Mapping[str, Any],
+    *,
+    target_asof: date,
+    last_eval_date: date,
+    cadence_weeks: int,
+    sleeve_name: str,
+) -> dict[str, Any]:
+    frozen_diag = dict(prev_diag)
+    if sleeve_name == "hk_southbound_bluechip_v1" or "cold_start" in frozen_diag:
+        frozen_diag["cold_start"] = False
+    frozen_diag["cadence_weeks"] = cadence_weeks
+    frozen_diag["cadence_action"] = "HELD_2W_FREEZE"
+    frozen_diag["freeze_asof"] = target_asof.isoformat()
+    frozen_diag["last_evaluated_asof"] = last_eval_date.isoformat()
+    return frozen_diag
+
+
+def _eval_or_freeze_sleeve(
+    sleeve_name: str,
+    *,
+    target_asof: date,
+    cadence_weeks: int,
+    previous_plan: WeeklyPlan | None,
+    active_symbols_on_asof: set[str],
+    default_sleeve_weight: Decimal,
+    compute_fn: Callable[[], tuple[dict[str, Decimal], dict[str, Any]]],
+) -> tuple[dict[str, Decimal], dict[str, Any]]:
+    prev_sw_map = previous_plan.sleeve_weights if previous_plan is not None else {}
+    prev_sleeve_weight = Decimal(prev_sw_map.get(sleeve_name, str(default_sleeve_weight)))
+    freeze, last_eval, frozen_weights = _should_freeze_sleeve(
+        sleeve_name,
+        target_asof,
+        cadence_weeks,
+        previous_plan,
+        active_symbols_on_asof,
+        prev_sleeve_weight,
+    )
+    if freeze and previous_plan is not None:
+        prev_diag_raw = previous_plan.sleeve_diagnostics.get(sleeve_name, {})
+        prev_diag: Mapping[str, Any] = prev_diag_raw if isinstance(prev_diag_raw, Mapping) else {}
+        return frozen_weights, _build_frozen_diag(
+            prev_diag,
+            target_asof=target_asof,
+            last_eval_date=last_eval,
+            cadence_weeks=cadence_weeks,
+            sleeve_name=sleeve_name,
+        )
+    weights, diag = compute_fn()
+    diag["cadence_weeks"] = cadence_weeks
+    diag["cadence_action"] = "EVALUATED"
+    diag["last_evaluated_asof"] = target_asof.isoformat()
+    return weights, diag
+
+
 def build_weekly_plan(
     *,
     asof_date: date | None = None,
@@ -275,6 +385,8 @@ def build_weekly_plan(
     hk_cache_dir: Path | None = None,
     sleeve_weights: SleeveWeights = _DEFAULT_SLEEVE_WEIGHTS,
     live_state: LiveSleeveState = _DEFAULT_LIVE_STATE,
+    cadences: SleeveCadences = _DEFAULT_SLEEVE_CADENCES,
+    previous_plan: WeeklyPlan | None = None,
     generated_at_utc: datetime | None = None,
 ) -> WeeklyPlan:
     """Compute immutable Monday execution plan across all 4 strategies."""
@@ -318,38 +430,80 @@ def build_weekly_plan(
         "HK", scheduled_monday, hk_open_dates=hk_open_set
     )
 
-    # 1. Run 4 sleeve engines
-    w_us_macro, diag_us_macro = compute_us_macro_targets(
-        target_asof,
-        us_data.eod_by_symbol,
-        crypto_rows,
-        actual_sleeve_weights=live_state.us_macro_weights,
-        prev_active_regime=live_state.us_macro_prev_regime,
+    # 1. Run 4 sleeve engines (honoring Hybrid C / custom per-sleeve cadences)
+    eff_prev_plan = previous_plan if previous_plan is not None else live_state.previous_plan
+    active_us_symbols = {
+        sym
+        for sym, bars in us_data.eod_by_symbol.items()
+        if bars and bars[-1].session == target_asof
+    }
+    active_hk_symbols = {
+        sym for sym, sym_bars in hk_bars.items() if sym_bars and target_asof in sym_bars
+    }
+
+    w_us_macro, diag_us_macro = _eval_or_freeze_sleeve(
+        "us_macro_allweather_v1",
+        target_asof=target_asof,
+        cadence_weeks=cadences.us_macro_weeks,
+        previous_plan=eff_prev_plan,
+        active_symbols_on_asof=active_us_symbols,
+        default_sleeve_weight=sleeve_weights.us_macro,
+        compute_fn=lambda: compute_us_macro_targets(
+            target_asof,
+            us_data.eod_by_symbol,
+            crypto_rows,
+            actual_sleeve_weights=live_state.us_macro_weights,
+            prev_active_regime=live_state.us_macro_prev_regime,
+        ),
     )
-    w_us_sqm, diag_us_sqm = compute_us_sqm_targets(
-        target_asof,
-        us_data.eod_by_symbol,
-        us_data.fundamentals_rows,
-        held_stocks=live_state.us_sqm_held_stocks,
+    w_us_sqm, diag_us_sqm = _eval_or_freeze_sleeve(
+        "us_sector_quality_mom_v1",
+        target_asof=target_asof,
+        cadence_weeks=cadences.us_sqm_weeks,
+        previous_plan=eff_prev_plan,
+        active_symbols_on_asof=active_us_symbols,
+        default_sleeve_weight=sleeve_weights.us_sqm,
+        compute_fn=lambda: compute_us_sqm_targets(
+            target_asof,
+            us_data.eod_by_symbol,
+            us_data.fundamentals_rows,
+            held_stocks=live_state.us_sqm_held_stocks,
+        ),
     )
-    w_hk_etf, diag_hk_etf = compute_hk_etf_targets(
-        target_asof,
-        hk_sessions,
-        hk_next_sess,
-        hk_bars,
-        hk_ts.hk_hold_rows,
-        hk_ts.ggt_rows,
-        actual_sleeve_weights=live_state.hk_etf_weights,
+    w_hk_etf, diag_hk_etf = _eval_or_freeze_sleeve(
+        "hk_etf_southbound_rot_v1",
+        target_asof=target_asof,
+        cadence_weeks=cadences.hk_etf_weeks,
+        previous_plan=eff_prev_plan,
+        active_symbols_on_asof=active_hk_symbols,
+        default_sleeve_weight=sleeve_weights.hk_etf,
+        compute_fn=lambda: compute_hk_etf_targets(
+            target_asof,
+            hk_sessions,
+            hk_next_sess,
+            hk_bars,
+            hk_ts.hk_hold_rows,
+            hk_ts.ggt_rows,
+            actual_sleeve_weights=live_state.hk_etf_weights,
+        ),
     )
-    w_hk_bc, diag_hk_bc = compute_hk_bluechip_targets(
-        target_asof,
-        hk_sessions,
-        hk_next_sess,
-        hk_bars,
-        hk_ts.hk_hold_rows,
-        hk_ts.ggt_rows,
-        actual_sleeve_weights=live_state.hk_bluechip_weights,
-        prev_regime_scale=live_state.hk_bluechip_prev_regime_scale,
+    w_hk_bc, diag_hk_bc = _eval_or_freeze_sleeve(
+        "hk_southbound_bluechip_v1",
+        target_asof=target_asof,
+        cadence_weeks=cadences.hk_bluechip_weeks,
+        previous_plan=eff_prev_plan,
+        active_symbols_on_asof=active_hk_symbols,
+        default_sleeve_weight=sleeve_weights.hk_bluechip,
+        compute_fn=lambda: compute_hk_bluechip_targets(
+            target_asof,
+            hk_sessions,
+            hk_next_sess,
+            hk_bars,
+            hk_ts.hk_hold_rows,
+            hk_ts.ggt_rows,
+            actual_sleeve_weights=live_state.hk_bluechip_weights,
+            prev_regime_scale=live_state.hk_bluechip_prev_regime_scale,
+        ),
     )
 
     # 2. Combine with 35% / 35% / 20% / 10% sleeve weights
@@ -450,6 +604,7 @@ def build_weekly_plan(
             **hk_ts.digests,
         },
         summary={
+            "cadence_profile": _cadence_profile_name(cadences),
             "us_invested_weight": f"{us_sum:.8f}",
             "us_cash_buffer_weight": f"{(sleeve_weights.us_total - us_sum):.8f}",
             "hk_invested_weight": f"{hk_sum:.8f}",

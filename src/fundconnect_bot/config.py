@@ -280,3 +280,41 @@ class IbkrConnectionConfig:
                 os.environ.get("IBKR_MARKET_DATA_TYPE", "4").strip() or "4"
             ),
         )
+
+
+@dataclass(frozen=True)
+class SleeveCadences:
+    """Per-sleeve evaluation cadence in weeks (Hybrid C default: 2W AW + 1W SQM + 1W HK_ETF + 2W HK_BC)."""
+
+    us_macro_weeks: int = 2
+    us_sqm_weeks: int = 1
+    hk_etf_weeks: int = 1
+    hk_bluechip_weeks: int = 2
+
+    def __post_init__(self) -> None:
+        vals = (
+            self.us_macro_weeks,
+            self.us_sqm_weeks,
+            self.hk_etf_weeks,
+            self.hk_bluechip_weeks,
+        )
+        if any(w < 1 for w in vals):
+            raise ValueError(f"All sleeve cadence weeks must be >= 1, got {vals}")
+
+    @classmethod
+    def uniform_1w(cls) -> SleeveCadences:
+        return cls(
+            us_macro_weeks=1,
+            us_sqm_weeks=1,
+            hk_etf_weeks=1,
+            hk_bluechip_weeks=1,
+        )
+
+    @classmethod
+    def hybrid_c(cls) -> SleeveCadences:
+        return cls(
+            us_macro_weeks=2,
+            us_sqm_weeks=1,
+            hk_etf_weeks=1,
+            hk_bluechip_weeks=2,
+        )
