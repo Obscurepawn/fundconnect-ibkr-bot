@@ -21,6 +21,8 @@ from ..config import (
     SleeveWeights,
 )
 from ..data.calendars import (
+    latest_completed_session,
+    latest_completed_thursday_cutoff,
     latest_completed_week_end,
     next_market_session,
     resolve_execution_session,
@@ -61,7 +63,7 @@ def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
 def _us_ref_close_on_asof(
     eod_by_symbol: Mapping[str, Any], symbol: str, asof_date: date
 ) -> Decimal:
-    bars = eod_by_symbol.get(symbol, ())
+    bars = [b for b in eod_by_symbol.get(symbol, ()) if b.session <= asof_date]
     if not bars or bars[-1].session != asof_date:
         raise ValueError(f"{symbol} lacks EOD bar on {asof_date}")
     return Decimal(str(bars[-1].raw_close))
@@ -386,45 +388,57 @@ def build_weekly_plan(
     sleeve_weights: SleeveWeights = _DEFAULT_SLEEVE_WEIGHTS,
     live_state: LiveSleeveState = _DEFAULT_LIVE_STATE,
     cadences: SleeveCadences = _DEFAULT_SLEEVE_CADENCES,
+    rebalance_day: Literal["monday", "friday"] = "monday",
     previous_plan: WeeklyPlan | None = None,
     generated_at_utc: datetime | None = None,
 ) -> WeeklyPlan:
-    """Compute immutable Monday execution plan across all 4 strategies."""
+    """Compute immutable weekly execution plan across all 4 strategies."""
     eff_us_cache = us_cache_dir or data_dir
     eff_hk_cache = hk_cache_dir or data_dir
 
-    target_asof = asof_date or latest_completed_week_end("US", datetime.now(UTC).date())
+    if asof_date is not None:
+        target_asof = asof_date
+    elif rebalance_day == "friday":
+        target_asof = latest_completed_thursday_cutoff(datetime.now(UTC))
+    else:
+        target_asof = latest_completed_week_end("US", datetime.now(UTC).date())
+
+    us_asof = latest_completed_session("US", target_asof)
 
     if refresh_data:
-        us_data = refresh_us_indexone_data(data_dir, end_date=target_asof)
+        us_data = refresh_us_indexone_data(data_dir, end_date=us_asof)
         crypto_rows, crypto_sha = load_or_fetch_cryptoracle_btc(
-            data_dir, end_date=target_asof, refresh=True
+            data_dir, end_date=us_asof, refresh=True
         )
         hk_ts = refresh_hk_tushare_data(data_dir, end_date=target_asof)
-        hk_sessions = tuple(d for d in hk_ts.open_dates if date(2023, 6, 1) <= d <= target_asof)
+        hk_open_set = frozenset(hk_ts.open_dates)
+        hk_asof = latest_completed_session("HK", target_asof, hk_open_dates=hk_open_set)
+        hk_sessions = tuple(d for d in hk_ts.open_dates if date(2023, 6, 1) <= d <= hk_asof)
         hk_bars, hk_eod_sha = refresh_hk_indexone_eod(
-            data_dir, hk_sessions=hk_sessions, end_date=target_asof
+            data_dir, hk_sessions=hk_sessions, end_date=hk_asof
         )
     else:
-        us_data = load_us_dataset_from_cache(eff_us_cache, max_date=target_asof)
+        us_data = load_us_dataset_from_cache(eff_us_cache, max_date=us_asof)
         crypto_rows, crypto_sha = load_or_fetch_cryptoracle_btc(
-            eff_us_cache, end_date=target_asof, refresh=False
+            eff_us_cache, end_date=us_asof, refresh=False
         )
         hk_ts = load_hk_tushare_from_cache(eff_hk_cache, max_date=target_asof)
-        hk_sessions = tuple(d for d in hk_ts.open_dates if date(2023, 6, 1) <= d <= target_asof)
+        hk_open_set = frozenset(hk_ts.open_dates)
+        hk_asof = latest_completed_session("HK", target_asof, hk_open_dates=hk_open_set)
+        hk_sessions = tuple(d for d in hk_ts.open_dates if date(2023, 6, 1) <= d <= hk_asof)
         hk_bars, hk_eod_sha = load_hk_eod_from_cache(
-            eff_hk_cache, hk_sessions=hk_sessions, max_date=target_asof
+            eff_hk_cache, hk_sessions=hk_sessions, max_date=hk_asof
         )
 
-    hk_open_set = frozenset(hk_ts.open_dates)
-    after_hk = [d for d in hk_ts.open_dates if d > target_asof]
-    hk_next_sess = after_hk[0] if after_hk else next_market_session("HK", target_asof)
+    after_hk = [d for d in hk_ts.open_dates if d > hk_asof]
+    hk_next_sess = after_hk[0] if after_hk else next_market_session("HK", hk_asof)
 
-    # Resolve scheduled Monday (+ automatic holiday deferral per exchange)
-    days_until_monday = (7 - target_asof.weekday()) % 7
-    if days_until_monday == 0:
-        days_until_monday = 7
-    scheduled_monday = target_asof + timedelta(days=days_until_monday)
+    # Resolve scheduled execution day (Monday or Friday, + automatic holiday deferral per exchange)
+    target_weekday = 4 if rebalance_day == "friday" else 0
+    days_ahead = (target_weekday - target_asof.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    scheduled_monday = target_asof + timedelta(days=days_ahead)
     us_exec_day, us_deferred = resolve_execution_session("US", scheduled_monday)
     hk_exec_day, hk_deferred = resolve_execution_session(
         "HK", scheduled_monday, hk_open_dates=hk_open_set
@@ -435,21 +449,21 @@ def build_weekly_plan(
     active_us_symbols = {
         sym
         for sym, bars in us_data.eod_by_symbol.items()
-        if bars and bars[-1].session == target_asof
+        if (sub := [b for b in bars if b.session <= us_asof]) and sub[-1].session == us_asof
     }
     active_hk_symbols = {
-        sym for sym, sym_bars in hk_bars.items() if sym_bars and target_asof in sym_bars
+        sym for sym, sym_bars in hk_bars.items() if sym_bars and hk_asof in sym_bars
     }
 
     w_us_macro, diag_us_macro = _eval_or_freeze_sleeve(
         "us_macro_allweather_v1",
-        target_asof=target_asof,
+        target_asof=us_asof,
         cadence_weeks=cadences.us_macro_weeks,
         previous_plan=eff_prev_plan,
         active_symbols_on_asof=active_us_symbols,
         default_sleeve_weight=sleeve_weights.us_macro,
         compute_fn=lambda: compute_us_macro_targets(
-            target_asof,
+            us_asof,
             us_data.eod_by_symbol,
             crypto_rows,
             actual_sleeve_weights=live_state.us_macro_weights,
@@ -458,13 +472,13 @@ def build_weekly_plan(
     )
     w_us_sqm, diag_us_sqm = _eval_or_freeze_sleeve(
         "us_sector_quality_mom_v1",
-        target_asof=target_asof,
+        target_asof=us_asof,
         cadence_weeks=cadences.us_sqm_weeks,
         previous_plan=eff_prev_plan,
         active_symbols_on_asof=active_us_symbols,
         default_sleeve_weight=sleeve_weights.us_sqm,
         compute_fn=lambda: compute_us_sqm_targets(
-            target_asof,
+            us_asof,
             us_data.eod_by_symbol,
             us_data.fundamentals_rows,
             held_stocks=live_state.us_sqm_held_stocks,
@@ -472,13 +486,13 @@ def build_weekly_plan(
     )
     w_hk_etf, diag_hk_etf = _eval_or_freeze_sleeve(
         "hk_etf_southbound_rot_v1",
-        target_asof=target_asof,
+        target_asof=hk_asof,
         cadence_weeks=cadences.hk_etf_weeks,
         previous_plan=eff_prev_plan,
         active_symbols_on_asof=active_hk_symbols,
         default_sleeve_weight=sleeve_weights.hk_etf,
         compute_fn=lambda: compute_hk_etf_targets(
-            target_asof,
+            hk_asof,
             hk_sessions,
             hk_next_sess,
             hk_bars,
@@ -489,13 +503,13 @@ def build_weekly_plan(
     )
     w_hk_bc, diag_hk_bc = _eval_or_freeze_sleeve(
         "hk_southbound_bluechip_v1",
-        target_asof=target_asof,
+        target_asof=hk_asof,
         cadence_weeks=cadences.hk_bluechip_weeks,
         previous_plan=eff_prev_plan,
         active_symbols_on_asof=active_hk_symbols,
         default_sleeve_weight=sleeve_weights.hk_bluechip,
         compute_fn=lambda: compute_hk_bluechip_targets(
-            target_asof,
+            hk_asof,
             hk_sessions,
             hk_next_sess,
             hk_bars,
@@ -532,14 +546,14 @@ def build_weekly_plan(
             mkt: Literal["US", "HK"] = "US"
             currency_lit: Literal["USD", "HKD"] = "USD"
             lot = 1
-            ref_px = _us_ref_close_on_asof(us_data.eod_by_symbol, sym, target_asof)
+            ref_px = _us_ref_close_on_asof(us_data.eod_by_symbol, sym, us_asof)
             is_etf = sym in US_MACRO_ETFS
             fallback = US_DEFENSIVE_SYMBOL
         else:
             mkt = "HK"
             currency_lit = "HKD"
             lot = get_hk_board_lot(sym, hk_basic_lots=hk_ts.board_lots)
-            ref_px = _hk_ref_close_on_asof(hk_bars, sym, target_asof)
+            ref_px = _hk_ref_close_on_asof(hk_bars, sym, hk_asof)
             is_etf = sym in ETF_BOARD_LOTS
             fallback = HK_DEFENSIVE_SYMBOL
 
@@ -564,8 +578,8 @@ def build_weekly_plan(
     hk_sum = sum((t.portfolio_weight for t in targets_list if t.market == "HK"), Decimal(0))
     total_invested = us_sum + hk_sum
 
-    shy_ref = _us_ref_close_on_asof(us_data.eod_by_symbol, US_DEFENSIVE_SYMBOL, target_asof)
-    hk_mm_ref = _hk_ref_close_on_asof(hk_bars, HK_DEFENSIVE_SYMBOL, target_asof)
+    shy_ref = _us_ref_close_on_asof(us_data.eod_by_symbol, US_DEFENSIVE_SYMBOL, us_asof)
+    hk_mm_ref = _hk_ref_close_on_asof(hk_bars, HK_DEFENSIVE_SYMBOL, hk_asof)
     gen_ts = (generated_at_utc or datetime.now(UTC)).isoformat()
 
     draft = WeeklyPlan(

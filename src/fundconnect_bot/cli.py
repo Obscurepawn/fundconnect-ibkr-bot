@@ -20,7 +20,7 @@ from .config import (
     SleeveCadences,
     SleeveWeights,
 )
-from .data.calendars import latest_completed_week_end
+from .data.calendars import latest_completed_thursday_cutoff, latest_completed_week_end
 from .execution.broker import (
     CashSnap,
     IbAsyncBrokerAdapter,
@@ -141,8 +141,10 @@ def _format_plan_markdown(plan: WeeklyPlan) -> str:
             cw = s_diag.get("cadence_weeks", 1)
             act = s_diag.get("cadence_action", "EVALUATED")
             cadence_parts.append(f"`{sleeve_name}` (`{cw}W` {act})")
+    day_label = "周五" if plan.scheduled_monday.weekday() == 4 else "周一"
+    ref_label = "周四参考收盘价" if plan.scheduled_monday.weekday() == 4 else "周五参考收盘价"
     lines = [
-        f"# 周一自动调仓计划书 (`asof={plan.asof_date.isoformat()}`)",
+        f"# {day_label}自动调仓计划书 (`asof={plan.asof_date.isoformat()}`)",
         "",
         f"- **计划哈希 (`plan_sha256`)**: `{plan.plan_sha256}`",
         f"- **港股执行交易日**: `{plan.hk_execution_session.isoformat()}` (`09:48 HKT`, 节假日顺延=`{plan.hk_deferred_holiday}`)",
@@ -155,7 +157,7 @@ def _format_plan_markdown(plan: WeeklyPlan) -> str:
         ),
         f"- **目标总仓位**: `{Decimal(plan.summary['total_invested_weight']):.2%}` (美股 `{Decimal(plan.summary['us_invested_weight']):.2%}` + 港股 `{Decimal(plan.summary['hk_invested_weight']):.2%}`，现金缓冲 `{Decimal(plan.summary['total_cash_buffer_weight']):.2%}`)",
         "",
-        "| 标的 | IBKR代码 | 市场/交易所 | 币种 | 组合目标权重 | 每手股数 (Lot) | 周五参考收盘价 | 防御回退标的 |",
+        f"| 标的 | IBKR代码 | 市场/交易所 | 币种 | 组合目标权重 | 每手股数 (Lot) | {ref_label} | 防御回退标的 |",
         "| :--- | :--- | :--- | :--- | ---: | ---: | ---: | :--- |",
     ]
     for t in plan.targets:
@@ -249,7 +251,13 @@ def _find_previous_plan_before(plans_dir: Path, target_asof: date) -> WeeklyPlan
 
 def _cmd_plan(args: argparse.Namespace) -> int:
     asof = date.fromisoformat(args.asof) if args.asof else None
-    target_asof = asof or latest_completed_week_end("US", datetime.now(UTC).date())
+    reb_day: Literal["monday", "friday"] = "friday" if args.rebalance_day == "friday" else "monday"
+    if asof is not None:
+        target_asof = asof
+    elif reb_day == "friday":
+        target_asof = latest_completed_thursday_cutoff(datetime.now(UTC))
+    else:
+        target_asof = latest_completed_week_end("US", datetime.now(UTC).date())
     us_dir, hk_dir = _resolve_cache_dirs(args.data_dir, args.us_cache_dir, args.hk_cache_dir)
 
     prev_plan = _find_previous_plan_before(args.out_dir, target_asof)
@@ -294,6 +302,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         sleeve_weights=SleeveWeights(),
         live_state=live_state,
         cadences=cadences,
+        rebalance_day=reb_day,
         previous_plan=prev_plan,
     )
     out_file = args.out_dir / f"plan_{plan.asof_date.strftime('%Y%m%d')}.json"
@@ -529,6 +538,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["hybrid-c", "uniform-1w"],
         default="hybrid-c",
         help="Rebalance cadence profile (default hybrid-c: 2W AW + 1W SQM + 1W HK_ETF + 2W HK_BC)",
+    )
+    p_plan.add_argument(
+        "--rebalance-day",
+        choices=["monday", "friday"],
+        default="monday",
+        help="Weekly execution day: monday (uses Friday close) or friday (uses Thursday close)",
     )
     p_plan.add_argument(
         "--sync-ibkr-holdings",

@@ -6,7 +6,7 @@
 
 ## 1. Composite Portfolio Architecture
 
-At each completed Friday close, `fundconnect-bot plan` evaluates four point-in-time (PIT) quantitative sleeves under the **Hybrid C** rebalancing cadence (default `--cadence hybrid-c`: `+52.75%` empirical backtest return, Sharpe `2.097`, MaxDD `-6.09%`; pass `--cadence uniform-1w` for weekly evaluation on all four sleeves) and emits an immutable, SHA-256-verified execution plan (`plan_YYYYMMDD.json` and `plans/latest_plan.json`):
+At each completed weekly cutoff (Friday close for Monday rebalances by default, or Thursday close via `--rebalance-day friday` for Friday `09:45 HKT` HK / `22:45 HKT` US rebalances), `fundconnect-bot plan` evaluates four point-in-time (PIT) quantitative sleeves under the **Hybrid C** rebalancing cadence (default `--cadence hybrid-c`: `+52.75%` empirical backtest return, Sharpe `2.097`, MaxDD `-6.09%`; pass `--cadence uniform-1w` for weekly evaluation on all four sleeves) and emits an immutable, SHA-256-verified execution plan (`plan_YYYYMMDD.json` and `plans/latest_plan.json`):
 
 | Sleeve ID | Portfolio Weight | Cadence | Universe & Causal Data Inputs | Defensive Safe Haven |
 | :--- | ---: | :---: | :--- | :--- |

@@ -2034,3 +2034,98 @@ def test_cli_plan_hybrid_c_auto_picks_previous_plan_and_uniform_1w_flag(
     ):
         assert plan_13_u1.sleeve_diagnostics[sleeve]["cadence_weeks"] == 1
         assert plan_13_u1.sleeve_diagnostics[sleeve]["cadence_action"] == "EVALUATED"
+
+
+def test_friday_rebalance_day_thursday_asof_and_thanksgiving_cutoff(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify Friday morning schedule uses Thursday completed close and resolves Friday sessions."""
+    from datetime import UTC, datetime
+
+    from fundconnect_bot.data.calendars import (
+        latest_completed_session,
+        latest_completed_thursday_cutoff,
+    )
+
+    # 1. Friday 2026-11-20 09:15 HKT (01:15 UTC) -> Thursday 2026-11-19 close is complete
+    fri_morning_utc = datetime(2026, 11, 20, 1, 15, tzinfo=UTC)
+    assert latest_completed_thursday_cutoff(fri_morning_utc) == date(2026, 11, 19)
+
+    # Before Thursday US close finishes (2026-11-20 04:00 HKT == 2026-11-19 20:00 UTC) -> prior Thu
+    before_us_close_utc = datetime(2026, 11, 19, 20, 0, tzinfo=UTC)
+    assert latest_completed_thursday_cutoff(before_us_close_utc) == date(2026, 11, 12)
+
+    # 2. Asymmetric Thursday holiday (US Thanksgiving 2026-11-26: US closed, HK open)
+    assert latest_completed_session("US", date(2026, 11, 26)) == date(2026, 11, 25)
+    assert latest_completed_session("HK", date(2026, 11, 26)) == date(2026, 11, 26)
+    assert latest_completed_thursday_cutoff(datetime(2026, 11, 27, 1, 15, tzinfo=UTC)) == date(
+        2026, 11, 26
+    )
+
+    # 3. CLI `--rebalance-day friday` across two consecutive Thursdays (2026-11-05 -> 2026-11-12)
+    assert (
+        cli_main(
+            [
+                "plan",
+                "--from-cache",
+                "--asof",
+                "2026-11-05",
+                "--rebalance-day",
+                "friday",
+                "--us-cache-dir",
+                str(US_CACHE_DIR),
+                "--hk-cache-dir",
+                str(HK_CACHE_DIR),
+                "--out-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    plan_thu1 = load_weekly_plan(tmp_path / "plan_20261105.json")
+    assert plan_thu1.asof_date == date(2026, 11, 5)
+    assert plan_thu1.us_execution_session == date(2026, 11, 6)
+    assert plan_thu1.hk_execution_session == date(2026, 11, 6)
+    assert plan_thu1.us_deferred_holiday is False
+    assert plan_thu1.hk_deferred_holiday is False
+    capsys.readouterr()
+
+    assert (
+        cli_main(
+            [
+                "plan",
+                "--from-cache",
+                "--asof",
+                "2026-11-12",
+                "--rebalance-day",
+                "friday",
+                "--us-cache-dir",
+                str(US_CACHE_DIR),
+                "--hk-cache-dir",
+                str(HK_CACHE_DIR),
+                "--out-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    fri_md = capsys.readouterr().out
+    assert "# 周五自动调仓计划书" in fri_md
+    plan_thu2 = load_weekly_plan(tmp_path / "plan_20261112.json")
+    assert plan_thu2.us_execution_session == date(2026, 11, 13)
+    assert plan_thu2.hk_execution_session == date(2026, 11, 13)
+    assert (
+        plan_thu2.sleeve_diagnostics["us_macro_allweather_v1"]["cadence_action"]
+        == "HELD_2W_FREEZE"
+    )
+    assert (
+        plan_thu2.sleeve_diagnostics["hk_southbound_bluechip_v1"]["cadence_action"]
+        == "HELD_2W_FREEZE"
+    )
+    assert (
+        plan_thu2.sleeve_diagnostics["us_sector_quality_mom_v1"]["cadence_action"] == "EVALUATED"
+    )
+    assert (
+        plan_thu2.sleeve_diagnostics["hk_etf_southbound_rot_v1"]["cadence_action"] == "EVALUATED"
+    )
+

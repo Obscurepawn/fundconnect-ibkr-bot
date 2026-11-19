@@ -2,20 +2,20 @@
 EXTENDS Integers, FiniteSets, TLC
 
 \* ============================ var <-> code map ============================
-\* CONSTANTS (read from src/fundconnect_bot/cli.py:564-609 & src/fundconnect_bot/execution/policy.py:1022-1071)
-\*   InitSellQty       - initial held SGOV.US shares (100)     (src/fundconnect_bot/cli.py:321)
+\* CONSTANTS (read from src/fundconnect_bot/cli.py:579-624 & src/fundconnect_bot/execution/policy.py:1022-1071)
+\*   InitSellQty       - initial held SGOV.US shares (100)     (src/fundconnect_bot/cli.py:330)
 \*   TargetBuyQty      - planned target buy shares (100)       (src/fundconnect_bot/execution/policy.py:476)
-\*   BootstrapFxUsd    - --bootstrap-fx-usd amount (30)        (src/fundconnect_bot/cli.py:587)
-\*   Run1ClientId      - initial --client-id (26)              (src/fundconnect_bot/cli.py:600)
-\*   Run2ClientIds     - retry --client-id domain ({26, 27})   (src/fundconnect_bot/cli.py:600)
-\*   FxConfigs         - {"NO_FX", "WITH_FX"} CLI mode         (src/fundconnect_bot/cli.py:593)
+\*   BootstrapFxUsd    - --bootstrap-fx-usd amount (30)        (src/fundconnect_bot/cli.py:602)
+\*   Run1ClientId      - initial --client-id (26)              (src/fundconnect_bot/cli.py:615)
+\*   Run2ClientIds     - retry --client-id domain ({26, 27})   (src/fundconnect_bot/cli.py:615)
+\*   FxConfigs         - {"NO_FX", "WITH_FX"} CLI mode         (src/fundconnect_bot/cli.py:608)
 \*
 \* VARIABLES
-\*   run_num           - CLI invocation number in {1, 2}       (src/fundconnect_bot/cli.py:483)
+\*   run_num           - CLI invocation number in {1, 2}       (src/fundconnect_bot/cli.py:492)
 \*                       DENOTES: Run 1 (initial) vs Run 2 (crash/operator retry)
 \*   step              - control point in execute_market_rebalance (src/fundconnect_bot/execution/policy.py:1144-1394)
 \*                       DENOTES: {"BUILD_BATCH","PHASE_A","AFTER_PHASE_A","FX_AND_CAP","PHASE_B","AFTER_PHASE_B","BETWEEN_RUNS","RUN2_DONE"}
-\*   run2_client_id    - clientId used by Run 2                (src/fundconnect_bot/cli.py:476, 600)
+\*   run2_client_id    - clientId used by Run 2                (src/fundconnect_bot/cli.py:485, 615)
 \*                       DENOTES: 26 (same clientId) or 27 (failover/manual cross-clientId)
 \*   fx_cfg            - whether --bootstrap-fx-usd + --allow-fx-convert active (src/fundconnect_bot/execution/policy.py:1217, 1257)
 \*                       DENOTES: immutable CLI FX configuration across retry
@@ -310,7 +310,7 @@ SavePhaseBAndFinishRun ==
     /\ step'           = IF run_num = 1 THEN "BETWEEN_RUNS" ELSE "RUN2_DONE"
     /\ UNCHANGED <<run_num, run2_client_id, fx_cfg, pos_sell, pos_buy, cash_avail, sell_orders, buy_orders, fx_orders, next_oid, batch_sell_qty, batch_buy_qty, capped_buy_qty, phase_b_intent, phase_a_status, phase_b_status, run1_scaled_buy, fx_converted_total>>
 
-\* ---- Step 7: Inter-run TWS venue events & CLI retry (src/fundconnect_bot/cli.py:446-498) ----
+\* ---- Step 7: Inter-run TWS venue events & CLI retry (src/fundconnect_bot/cli.py:455-507) ----
 
 InterRunTwsFillWorking ==
     \* Open Working order from Run 1 fills on TWS before Run 2 starts
@@ -349,7 +349,7 @@ InterRunTwsCancelWorking ==
     /\ UNCHANGED <<run_num, step, run2_client_id, fx_cfg, pos_sell, pos_buy, cash_avail, next_oid, disk_completed, batch_sell_qty, batch_buy_qty, capped_buy_qty, phase_b_intent, phase_a_status, phase_b_status, run1_scaled_buy, fx_converted_total>>
 
 StartRetryRun2 ==
-    \* Operator or systemd service invokes `fundconnect-bot execute --live` for Run 2 (src/fundconnect_bot/cli.py:483-493)
+    \* Operator or systemd service invokes `fundconnect-bot execute --live` for Run 2 (src/fundconnect_bot/cli.py:492-502)
     /\ step = "BETWEEN_RUNS"
     /\ run_num' = 2
     /\ step'    = "BUILD_BATCH"

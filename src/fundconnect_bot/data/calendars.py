@@ -66,6 +66,37 @@ def next_market_session(
     return resolved
 
 
+def latest_completed_session(
+    market: MarketCode,
+    as_of: date,
+    *,
+    hk_open_dates: frozenset[date] | set[date] | None = None,
+) -> date:
+    """Find the most recent open trading session `<= as_of` on `market`."""
+    cursor = as_of
+    for _ in range(15):
+        if is_market_session(market, cursor, hk_open_dates=hk_open_dates):
+            return cursor
+        cursor -= timedelta(days=1)
+    raise ValueError(f"Unable to locate open {market} session on or before {as_of}")
+
+
+def latest_completed_thursday_cutoff(now_utc: datetime) -> date:
+    """Find the most recent Thursday whose US and HK trading sessions have fully closed."""
+    now_hkt_date = now_utc.astimezone(HK_TZ).date()
+    days_since_thu = (now_hkt_date.weekday() - 3) % 7
+    cand_thu = now_hkt_date - timedelta(days=days_since_thu)
+    for _ in range(4):
+        us_sess = latest_completed_session("US", cand_thu)
+        hk_sess = latest_completed_session("HK", cand_thu)
+        _, us_cutoff_utc = us_close_and_cutoff(us_sess)
+        hk_close_utc = hk_close_time(hk_sess).astimezone(UTC)
+        if us_cutoff_utc <= now_utc and hk_close_utc <= now_utc:
+            return cand_thu
+        cand_thu -= timedelta(days=7)
+    raise ValueError(f"Unable to locate completed Thursday cutoff before {now_utc.isoformat()}")
+
+
 def latest_completed_week_end(
     market: MarketCode,
     as_of: date,

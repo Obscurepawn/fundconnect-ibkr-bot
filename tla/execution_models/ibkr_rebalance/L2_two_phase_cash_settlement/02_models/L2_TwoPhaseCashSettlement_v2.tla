@@ -2,8 +2,8 @@
 EXTENDS Integers, FiniteSets, TLC
 
 \* ============================ var <-> code map ============================
-\* CONSTANTS (read from src/fundconnect_bot/config.py:213-253 & src/fundconnect_bot/cli.py:564-609)
-\*   Scenarios          - one-way USD->HKD cash/settlement scenarios (src/fundconnect_bot/cli.py:564-609, LESSONS.md R6)
+\* CONSTANTS (read from src/fundconnect_bot/config.py:213-253 & src/fundconnect_bot/cli.py:579-624)
+\*   Scenarios          - one-way USD->HKD cash/settlement scenarios (src/fundconnect_bot/cli.py:579-624, LESSONS.md R6)
 \*   RequireSettledHkd  - config.require_settled_hkd (TRUE)      (src/fundconnect_bot/config.py:251)
 \*   LotUnitCost        - per-lot worst-case buy outlay + fee    (src/fundconnect_bot/execution/policy.py:960-981)
 \*
